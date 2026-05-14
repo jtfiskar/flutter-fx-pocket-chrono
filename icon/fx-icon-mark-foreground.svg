@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Foreground for Android adaptive icons: transparent background, glyph
+       drawn inside the safe-zone radius. Android masks the foreground to
+       arbitrary shapes, so the glyph sits at ~50% scale to survive cropping.
+       1.5 user-unit stroke × scale(28) = 42 px, matching the shipped
+       fx-icon-mark-foreground-1024.png. -->
+  <g transform="translate(512 512) scale(28) translate(-12 -12)"
+     fill="none" stroke="#0A0E14" stroke-width="1.5"
+     stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 12h4l2-6 4 12 2-6h4"/>
+  </g>
+</svg>

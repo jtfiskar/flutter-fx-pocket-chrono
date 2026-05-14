@@ -1,36 +1,61 @@
 import 'package:flutter/material.dart';
 
+/// Design tokens lifted from the Open Design prototype:
+/// amber-on-OLED, hairline borders, four-step elevation. Every screen
+/// pulls from these — change `accent` here to recolor the whole app.
 class AppColors {
-  // Primary backgrounds
-  static const Color background = Color(0xFF141414);
-  static const Color surface = Color(0xFF1F1F1F);
-  static const Color surfaceElevated = Color(0xFF2A2A2A);
-  static const Color border = Color(0xFF343434);
+  // Canvas + elevation
+  static const Color background = Color(0xFF0A0E14);
+  static const Color surface = Color(0xFF121823);
+  static const Color surfaceElevated = Color(0xFF1A212E);
+  static const Color surfaceHigh = Color(0xFF242E3E);
+  static const Color border = Color(0xFF232B39);
+  static const Color borderStrong = Color(0xFF3A4763);
 
-  // Accent colors
-  static const Color primary = Color(0xFF008EFF);
-  static const Color primaryDark = Color(0xFF0A6FCF);
-  static const Color success = Color(0xFF64DD17);
-  static const Color warning = Color(0xFFD2A03C);
-  static const Color error = Color(0xFFEB1A1C);
+  // Foreground tiers
+  static const Color textPrimary = Color(0xFFF1F4F9);
+  static const Color textSecondary = Color(0xFFA8B3C6);
+  static const Color textTertiary = Color(0xFF6B768C);
+  static const Color textMuted = Color(0xFF4A5468);
 
-  // Wind call direction colors
-  static const Color leftAdjust = Color(0xFF06B6D4);  // Cyan
-  static const Color rightAdjust = Color(0xFFF97316); // Orange
-  static const Color holdZero = Color(0xFFA5A5A5);    // Gray
+  // Signal amber (replaces blue brand)
+  static const Color accent = Color(0xFFFFC14A);
+  static const Color accentSoft = Color(0xFFFFD680);
+  static const Color accentDeep = Color(0xFFD99C1F);
+  static const Color accentGlow = Color(0x38FFC14A); // ~22% alpha
+  static const Color accentLine = Color(0x66FFC14A); // ~40% alpha
+  static const Color accentBand = Color(0x1AFFC14A); // ~10% alpha
 
-  // Text colors
-  static const Color textPrimary = Color(0xFFF5F5F5);
-  static const Color textSecondary = Color(0xFFA5A5A5);
-  static const Color textTertiary = Color(0xFF787878);
+  // Semantic colors — reserved meanings, do not reuse for decoration
+  static const Color good = Color(0xFF7FC88A);
+  static const Color warn = Color(0xFFFFAA3F);
+  static const Color danger = Color(0xFFFF6464);
+  static const Color info = Color(0xFF5FA8FF);
 
-  // Interactive hint color (for toggle affordances)
-  static const Color toggleHint = Color(0xFF008EFF);  // Same as primary, visible
+  // Back-compat aliases — existing code references these names.
+  // Routes new amber accent + semantic colors through the old identifiers
+  // so screens not yet redesigned still inherit the refreshed palette.
+  static const Color primary = accent;
+  static const Color primaryDark = accentDeep;
+  static const Color success = good;
+  static const Color warning = warn;
+  static const Color error = danger;
+  static const Color toggleHint = accent;
+  static const Color signalGood = good;
+  static const Color signalMedium = warn;
+  static const Color signalPoor = danger;
 
-  // Signal strength colors
-  static const Color signalGood = success;
-  static const Color signalMedium = warning;
-  static const Color signalPoor = error;
+  // Wind call direction (unused by Chrono Lite but kept for API stability)
+  static const Color leftAdjust = Color(0xFF06B6D4);
+  static const Color rightAdjust = Color(0xFFF97316);
+  static const Color holdZero = textTertiary;
+}
+
+/// Typography families. SairaCondensed for numerics (instrument-cluster feel),
+/// JetBrainsMono for timestamps and MAC strings, system UI font for body text.
+class AppFonts {
+  static const String numerals = 'SairaCondensed';
+  static const String mono = 'JetBrainsMono';
 }
 
 class AppTheme {
@@ -39,22 +64,19 @@ class AppTheme {
       useMaterial3: true,
       brightness: Brightness.dark,
 
-      // Color scheme
       colorScheme: const ColorScheme.dark(
         surface: AppColors.background,
-        primary: AppColors.primary,
-        onPrimary: AppColors.textPrimary,
-        secondary: AppColors.primaryDark,
+        primary: AppColors.accent,
+        onPrimary: AppColors.background,
+        secondary: AppColors.accentDeep,
         onSecondary: AppColors.textPrimary,
-        error: AppColors.error,
+        error: AppColors.danger,
         onError: AppColors.textPrimary,
         onSurface: AppColors.textPrimary,
       ),
 
-      // Scaffold background
       scaffoldBackgroundColor: AppColors.background,
 
-      // AppBar theme
       appBarTheme: const AppBarTheme(
         backgroundColor: AppColors.background,
         foregroundColor: AppColors.textPrimary,
@@ -67,26 +89,23 @@ class AppTheme {
         ),
       ),
 
-      // Card theme
       cardTheme: CardThemeData(
         color: AppColors.surface,
         elevation: 0,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(14),
           side: const BorderSide(color: AppColors.border, width: 1),
         ),
       ),
 
-      // Bottom sheet theme
       bottomSheetTheme: const BottomSheetThemeData(
         backgroundColor: AppColors.surface,
         modalBackgroundColor: AppColors.surface,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
         ),
       ),
 
-      // Dialog theme
       dialogTheme: DialogThemeData(
         backgroundColor: AppColors.surface,
         shape: RoundedRectangleBorder(
@@ -99,146 +118,136 @@ class AppTheme {
         ),
       ),
 
-      // Input decoration theme
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
         fillColor: AppColors.surfaceElevated,
         border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: BorderRadius.circular(10),
           borderSide: const BorderSide(color: AppColors.border),
         ),
         enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: BorderRadius.circular(10),
           borderSide: const BorderSide(color: AppColors.border),
         ),
         focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(8),
-          borderSide: const BorderSide(color: AppColors.primary, width: 2),
+          borderRadius: BorderRadius.circular(10),
+          borderSide: const BorderSide(color: AppColors.accent, width: 2),
         ),
         labelStyle: const TextStyle(color: AppColors.textSecondary),
         hintStyle: const TextStyle(color: AppColors.textTertiary),
       ),
 
-      // Elevated button theme
       elevatedButtonTheme: ElevatedButtonThemeData(
         style: ElevatedButton.styleFrom(
-          backgroundColor: AppColors.primary,
+          backgroundColor: AppColors.accent,
           foregroundColor: AppColors.background,
           elevation: 0,
-          minimumSize: const Size.fromHeight(44),
+          minimumSize: const Size.fromHeight(48),
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(8),
+            borderRadius: BorderRadius.circular(12),
           ),
           textStyle: const TextStyle(
-            fontSize: 16,
-            fontWeight: FontWeight.w600,
+            fontSize: 14,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 0.5,
           ),
         ),
       ),
 
-      // Outlined button theme
       outlinedButtonTheme: OutlinedButtonThemeData(
         style: OutlinedButton.styleFrom(
           foregroundColor: AppColors.textPrimary,
-          minimumSize: const Size.fromHeight(44),
+          backgroundColor: AppColors.surface,
+          minimumSize: const Size.fromHeight(48),
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
           side: const BorderSide(color: AppColors.border),
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(8),
+            borderRadius: BorderRadius.circular(12),
           ),
           textStyle: const TextStyle(
-            fontSize: 16,
+            fontSize: 14,
+            fontWeight: FontWeight.w600,
+            letterSpacing: 0.5,
+          ),
+        ),
+      ),
+
+      textButtonTheme: TextButtonThemeData(
+        style: TextButton.styleFrom(
+          foregroundColor: AppColors.accent,
+          textStyle: const TextStyle(
+            fontSize: 14,
             fontWeight: FontWeight.w600,
           ),
         ),
       ),
 
-      // Text button theme
-      textButtonTheme: TextButtonThemeData(
-        style: TextButton.styleFrom(
-          foregroundColor: AppColors.primary,
-          textStyle: const TextStyle(
-            fontSize: 16,
-            fontWeight: FontWeight.w500,
-          ),
-        ),
-      ),
-
-      // Icon theme
       iconTheme: const IconThemeData(
         color: AppColors.textSecondary,
-        size: 24,
+        size: 22,
       ),
 
-      // Divider theme
       dividerTheme: const DividerThemeData(
         color: AppColors.border,
         thickness: 1,
       ),
 
-      // Switch theme
       switchTheme: SwitchThemeData(
         thumbColor: WidgetStateProperty.resolveWith((states) {
           if (states.contains(WidgetState.selected)) {
-            return AppColors.primary;
+            return AppColors.accent;
           }
           return AppColors.textTertiary;
         }),
         trackColor: WidgetStateProperty.resolveWith((states) {
           if (states.contains(WidgetState.selected)) {
-            return AppColors.primary.withOpacity(0.3);
+            return AppColors.accent.withValues(alpha: 0.3);
           }
           return AppColors.border;
         }),
       ),
 
-      // Tab bar theme
       tabBarTheme: const TabBarThemeData(
-        labelColor: AppColors.primary,
+        labelColor: AppColors.accent,
         unselectedLabelColor: AppColors.textSecondary,
-        indicatorColor: AppColors.primary,
-        labelStyle: TextStyle(
-          fontSize: 14,
-          fontWeight: FontWeight.w600,
-        ),
-        unselectedLabelStyle: TextStyle(
-          fontSize: 14,
-          fontWeight: FontWeight.w400,
-        ),
+        indicatorColor: AppColors.accent,
+        labelStyle: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, letterSpacing: 0.8),
+        unselectedLabelStyle: TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
       ),
 
-      // Chip theme
       chipTheme: ChipThemeData(
         backgroundColor: AppColors.surfaceElevated,
-        selectedColor: AppColors.primary.withOpacity(0.2),
+        selectedColor: AppColors.accent.withValues(alpha: 0.18),
         labelStyle: const TextStyle(
-          fontSize: 14,
+          fontSize: 13,
           color: AppColors.textPrimary,
+          fontWeight: FontWeight.w500,
         ),
         side: const BorderSide(color: AppColors.border),
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: BorderRadius.circular(999),
         ),
       ),
 
-      // Slider theme
       sliderTheme: SliderThemeData(
-        activeTrackColor: AppColors.primary,
+        activeTrackColor: AppColors.accent,
         inactiveTrackColor: AppColors.border,
-        thumbColor: AppColors.primary,
-        overlayColor: AppColors.primary.withOpacity(0.2),
+        thumbColor: AppColors.accent,
+        overlayColor: AppColors.accent.withValues(alpha: 0.2),
       ),
     );
   }
 }
 
-// Text styles for wind call display
+/// Text styles for wind-call display — preserved from earlier wind-call screens.
+/// Not currently rendered by Chrono Lite but kept to avoid breaking external
+/// references during the OSS publish.
 class WindCallTextStyles {
   static const TextStyle value = TextStyle(
-    fontFamily: 'JetBrainsMono',
+    fontFamily: AppFonts.numerals,
     fontSize: 72,
-    fontWeight: FontWeight.w700,
+    fontWeight: FontWeight.w800,
     color: AppColors.textPrimary,
     height: 1.0,
   );

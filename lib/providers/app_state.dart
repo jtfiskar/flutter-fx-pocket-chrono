@@ -338,6 +338,7 @@ class AppState extends ChangeNotifier {
       rssi: rssi,
       batteryPercent: broadcastData.batteryPercent,
       signalStrength: broadcastData.signalStrength,
+      firmwareVersion: broadcastData.firmwareVersion,
       lastSeen: DateTime.now(),
     );
 

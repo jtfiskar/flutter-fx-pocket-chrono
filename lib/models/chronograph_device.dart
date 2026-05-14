@@ -27,6 +27,10 @@ class ChronographDevice {
   /// Signal strength percentage (0-100), null if not available
   final int? signalStrength;
 
+  /// Firmware version string ("major.minor") parsed from the broadcast,
+  /// null until the first valid packet is processed.
+  final String? firmwareVersion;
+
   /// Last time device was seen (scan result received)
   final DateTime lastSeen;
 
@@ -37,6 +41,7 @@ class ChronographDevice {
     required this.rssi,
     required this.batteryPercent,
     this.signalStrength,
+    this.firmwareVersion,
     required this.lastSeen,
   });
 
@@ -69,6 +74,7 @@ class ChronographDevice {
     int? rssi,
     int? batteryPercent,
     int? signalStrength,
+    String? firmwareVersion,
     DateTime? lastSeen,
   }) {
     return ChronographDevice(
@@ -78,6 +84,7 @@ class ChronographDevice {
       rssi: rssi ?? this.rssi,
       batteryPercent: batteryPercent ?? this.batteryPercent,
       signalStrength: signalStrength ?? this.signalStrength,
+      firmwareVersion: firmwareVersion ?? this.firmwareVersion,
       lastSeen: lastSeen ?? this.lastSeen,
     );
   }

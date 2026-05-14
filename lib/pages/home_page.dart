@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:provider/provider.dart';
@@ -12,9 +11,10 @@ import '../widgets/energy_display.dart';
 import '../widgets/statistics_row.dart';
 import '../widgets/shot_list.dart';
 import '../widgets/device_status_bar.dart';
+import '../widgets/pairing_drawer.dart';
+import '../widgets/trend_chart.dart';
 import '../widgets/weight_input.dart';
 import '../services/broadcast_parser.dart';
-import '../models/broadcast_data.dart';
 import '../utils/responsive.dart';
 import '../config/app_config.dart';
 import '../utils/demo_velocity_generator.dart';
@@ -27,24 +27,35 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
-  // BLE scanning
-  List<ScanResult> _scanResults = [];
+class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
+  final List<ScanResult> _scanResults = [];
   StreamSubscription<List<ScanResult>>? _scanSubscription;
   Timer? _deviceLossTimer;
+  Timer? _scanWatchdog;
 
-  // Track selected device for filtering broadcasts
   String? _selectedDeviceId;
 
-  // Demo mode
+  /// True after explicit Disconnect/Forget/Stop, or when _startScan bails
+  /// because permissions were denied or Bluetooth is off. Suppresses the
+  /// watchdog and the lifecycle hook from silently restarting the radio
+  /// (and re-prompting the user) until they tap Scan again.
+  bool _userPausedScan = false;
+
+  /// True while a [_startScan] call is awaiting permission or adapter
+  /// state. Prevents the watchdog (and the resume hook) from re-entering
+  /// _startScan while permission_handler/flutter_blue_plus calls are in
+  /// flight, which can race or stack permission dialogs.
+  bool _scanStarting = false;
+
   final DemoVelocityGenerator? _demoGenerator =
       AppConfig.kDemoMode ? DemoVelocityGenerator() : null;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _startDeviceLossTimer();
-    // Auto-start scanning after first frame
+    _startScanWatchdog();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _startScan();
     });
@@ -52,22 +63,33 @@ class _HomePageState extends State<HomePage> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _scanSubscription?.cancel();
     _deviceLossTimer?.cancel();
+    _scanWatchdog?.cancel();
     if (Platform.isAndroid || Platform.isIOS) {
       FlutterBluePlus.stopScan();
     }
     super.dispose();
   }
 
-  // ==================== DEVICE LOSS DETECTION ====================
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // iOS pauses BLE scans when backgrounded (we have no service UUID to
+    // filter by, so we can't run in the background). Android can throttle
+    // long-running scans to opportunistic mode. On resume, restart the scan
+    // unless the user explicitly paused it via Disconnect/Forget.
+    if (state == AppLifecycleState.resumed &&
+        !_userPausedScan &&
+        mounted) {
+      _startScan();
+    }
+  }
 
   void _startDeviceLossTimer() {
     _deviceLossTimer = Timer.periodic(
       const Duration(seconds: 1),
       (_) {
-        // AppState handles device loss detection via lastSeen timestamp
-        // This timer just triggers UI updates to show lost state
         if (mounted) {
           final appState = context.read<AppState>();
           if (appState.isDeviceLost) {
@@ -78,115 +100,135 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  // ==================== BLE SCANNING ====================
+  /// Periodically nudge the BLE radio back on if it has stopped while the
+  /// user expects it to be running. Android throttles scans after roughly
+  /// 30 minutes; flutter_blue_plus' isScanningNow goes false silently. We
+  /// re-issue startScan when that happens.
+  void _startScanWatchdog() {
+    _scanWatchdog = Timer.periodic(const Duration(seconds: 10), (_) {
+      if (!mounted) return;
+      if (_userPausedScan) return;
+      // Don't trample an in-flight permission/adapter check. Otherwise the
+      // watchdog can re-enter _startScan while the user is still looking
+      // at the OS permission dialog from the initial call.
+      if (_scanStarting) return;
+      if (!(Platform.isAndroid || Platform.isIOS)) return;
+      if (FlutterBluePlus.isScanningNow) return;
+      debugPrint('Scan watchdog: radio idle while we want it on — restarting');
+      _startScan();
+    });
+  }
 
   Future<void> _startScan() async {
-    // BLE scanning only supported on mobile platforms
-    if (!Platform.isAndroid && !Platform.isIOS) {
-      debugPrint('BLE scanning not supported on this platform');
-      return;
-    }
-
-    // Request permissions
-    if (Platform.isAndroid) {
-      final locationStatus = await Permission.locationWhenInUse.request();
-      final bluetoothScan = await Permission.bluetoothScan.request();
-      final bluetoothConnect = await Permission.bluetoothConnect.request();
-
-      if (!mounted) return;
-
-      if (locationStatus != PermissionStatus.granted ||
-          bluetoothScan != PermissionStatus.granted ||
-          bluetoothConnect != PermissionStatus.granted) {
-        _showPermissionError();
+    // An in-flight call (permission dialog open, adapter check pending)
+    // must not be re-entered — concurrent permission_handler/scan calls
+    // can race.
+    if (_scanStarting) return;
+    _scanStarting = true;
+    try {
+      // Any explicit attempt to start the scan clears the paused flag so
+      // the watchdog and lifecycle hook are allowed to keep it alive.
+      _userPausedScan = false;
+      if (!Platform.isAndroid && !Platform.isIOS) {
+        debugPrint('BLE scanning not supported on this platform');
         return;
       }
-    } else if (Platform.isIOS) {
-      final bluetoothStatus = await Permission.bluetooth.request();
 
-      if (!mounted) return;
+      if (Platform.isAndroid) {
+        final locationStatus = await Permission.locationWhenInUse.request();
+        final bluetoothScan = await Permission.bluetoothScan.request();
+        final bluetoothConnect = await Permission.bluetoothConnect.request();
 
-      if (bluetoothStatus != PermissionStatus.granted) {
-        _showPermissionError();
-        return;
-      }
-    }
+        if (!mounted) return;
 
-    // Check if Bluetooth is on (wait for definitive state, not unknown)
-    final adapterState = await FlutterBluePlus.adapterState
-        .firstWhere((state) => state != BluetoothAdapterState.unknown)
-        .timeout(
-          const Duration(seconds: 3),
-          onTimeout: () => BluetoothAdapterState.unknown,
-        );
-    if (!mounted) return;
-
-    if (adapterState != BluetoothAdapterState.on) {
-      _showBluetoothOffError();
-      return;
-    }
-
-    final appState = context.read<AppState>();
-    appState.setScanning(true);
-    _scanResults.clear();
-
-    // Cancel any existing subscription
-    await _scanSubscription?.cancel();
-
-    // Start listening to scan results
-    _scanSubscription = FlutterBluePlus.onScanResults.listen(
-      (results) {
-        for (final result in results) {
-          _processScanResult(result);
+        if (locationStatus != PermissionStatus.granted ||
+            bluetoothScan != PermissionStatus.granted ||
+            bluetoothConnect != PermissionStatus.granted) {
+          // Park the scan-paused flag so the watchdog and lifecycle hook
+          // don't retry every 10 s and re-prompt the user. They re-arm by
+          // tapping SCAN in the pairing drawer.
+          _userPausedScan = true;
+          _showPermissionError();
+          return;
         }
-      },
-      onError: (e) {
-        debugPrint('Scan error: $e');
-      },
-    );
+      } else if (Platform.isIOS) {
+        final bluetoothStatus = await Permission.bluetooth.request();
+        if (!mounted) return;
+        if (bluetoothStatus != PermissionStatus.granted) {
+          _userPausedScan = true;
+          _showPermissionError();
+          return;
+        }
+      }
 
-    // Start scanning with continuous updates to receive repeated advertisements
-    // No timeout - scan runs until explicitly stopped or app closes
-    await FlutterBluePlus.startScan(
-      continuousUpdates: true,
-    );
+      final adapterState = await FlutterBluePlus.adapterState
+          .firstWhere((state) => state != BluetoothAdapterState.unknown)
+          .timeout(
+            const Duration(seconds: 3),
+            onTimeout: () => BluetoothAdapterState.unknown,
+          );
+      if (!mounted) return;
+
+      if (adapterState != BluetoothAdapterState.on) {
+        // Same reasoning as the permission branches above — bail out of the
+        // watchdog cycle until the user explicitly re-arms scanning.
+        _userPausedScan = true;
+        _showBluetoothOffError();
+        return;
+      }
+
+      final appState = context.read<AppState>();
+      appState.setScanning(true);
+      _scanResults.clear();
+
+      await _scanSubscription?.cancel();
+      _scanSubscription = FlutterBluePlus.onScanResults.listen(
+        (results) {
+          for (final result in results) {
+            _processScanResult(result);
+          }
+        },
+        onError: (e) {
+          debugPrint('Scan error: $e');
+        },
+      );
+
+      await FlutterBluePlus.startScan(continuousUpdates: true);
+    } finally {
+      _scanStarting = false;
+    }
   }
 
   void _stopScan() {
+    // Explicit STOP from the drawer is a user-paused state — keep the
+    // radio off until they tap SCAN again, even if the app is resumed
+    // or the watchdog ticks.
+    _userPausedScan = true;
     FlutterBluePlus.stopScan();
     context.read<AppState>().setScanning(false);
   }
 
   void _processScanResult(ScanResult result) {
-    // Check if this is a fresh advertisement (received within last 3 seconds)
-    final msSinceAdvert = DateTime.now().difference(result.timeStamp).inMilliseconds;
-    if (msSinceAdvert > 3000) {
-      // Stale cached advertisement, ignore
-      return;
-    }
+    final msSinceAdvert =
+        DateTime.now().difference(result.timeStamp).inMilliseconds;
+    if (msSinceAdvert > 3000) return;
 
-    // Check for Nordic manufacturer data (company ID 0x0059)
     final manufacturerData = result.advertisementData.manufacturerData;
     final nordicData = manufacturerData[0x0059];
 
     if (nordicData != null && BroadcastParser.isPocketDevice(nordicData)) {
-      // Parse the broadcast data
       final broadcastData = BroadcastParser.parse(nordicData);
 
       if (broadcastData.isValid) {
         final deviceId = result.device.remoteId.str;
         final appState = context.read<AppState>();
 
-        // Determine which device to connect to:
-        // 1. If we have a selected device, only connect to that one
-        // 2. If no selection yet, prefer the saved device ID from last session
-        // 3. If no saved device, auto-select this one (first valid device)
         final savedDeviceId = appState.lastConnectedDeviceId;
         final targetDeviceId = _selectedDeviceId ?? savedDeviceId;
-        final shouldConnect = targetDeviceId == null || targetDeviceId == deviceId;
+        final shouldConnect =
+            targetDeviceId == null || targetDeviceId == deviceId;
 
         if (shouldConnect) {
-          // Process the broadcast in AppState
           appState.processBroadcast(
             deviceId,
             result.device.platformName,
@@ -194,22 +236,27 @@ class _HomePageState extends State<HomePage> {
             broadcastData,
           );
 
-          // Auto-select and save device ID only when it changes
           if (_selectedDeviceId == null) {
             _selectedDeviceId = deviceId;
-            // Save the connected device ID for auto-reconnect (only on new selection)
             if (savedDeviceId != deviceId) {
               appState.setLastConnectedDeviceId(deviceId);
             }
           }
         }
 
-        // Add to scan results for device list
-        if (!_scanResults.any((r) => r.device.remoteId == result.device.remoteId)) {
-          setState(() {
+        // Replace, don't just append — otherwise a device that goes silent
+        // keeps its stale RSSI and timestamp in the list forever. Consumers
+        // filter by ScanResult.timeStamp to decide which entries are still
+        // in range.
+        final existingIndex = _scanResults
+            .indexWhere((r) => r.device.remoteId == result.device.remoteId);
+        setState(() {
+          if (existingIndex >= 0) {
+            _scanResults[existingIndex] = result;
+          } else {
             _scanResults.add(result);
-          });
-        }
+          }
+        });
       }
     }
   }
@@ -218,7 +265,7 @@ class _HomePageState extends State<HomePage> {
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
         content: Text('Bluetooth and location permissions are required'),
-        backgroundColor: AppColors.error,
+        backgroundColor: AppColors.danger,
       ),
     );
   }
@@ -227,51 +274,66 @@ class _HomePageState extends State<HomePage> {
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
         content: Text('Please turn on Bluetooth'),
-        backgroundColor: AppColors.warning,
+        backgroundColor: AppColors.warn,
       ),
     );
   }
-
-  // ==================== DEVICE DRAWER ====================
 
   void _showDeviceDrawer() {
     showModalBottomSheet(
       context: context,
-      backgroundColor: AppColors.surface,
+      backgroundColor: Colors.transparent,
+      barrierColor: Colors.black.withValues(alpha: 0.45),
       isScrollControlled: true,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (context) => _DeviceDrawer(
-        scanResults: _scanResults,
-        isScanning: context.watch<AppState>().isScanning,
-        selectedDeviceId: _selectedDeviceId,
-        onStartScan: _startScan,
-        onStopScan: _stopScan,
-        onSelectDevice: (deviceId) {
-          setState(() {
-            _selectedDeviceId = deviceId;
-          });
-          // Save the selected device ID for auto-reconnect
-          context.read<AppState>().setLastConnectedDeviceId(deviceId);
-          Navigator.pop(context);
-        },
-        onDisconnect: () {
-          setState(() {
-            _selectedDeviceId = null;
-            _scanResults.clear();
-          });
-          final appState = context.read<AppState>();
-          appState.disconnectDevice();
-          // Clear saved device ID on explicit disconnect
-          appState.setLastConnectedDeviceId(null);
-          Navigator.pop(context);
-        },
-      ),
+      builder: (sheetCtx) {
+        final appState = sheetCtx.watch<AppState>();
+        return PairingDrawer(
+          scanResults: _scanResults,
+          isScanning: appState.isScanning,
+          selectedDeviceId: _selectedDeviceId,
+          savedDeviceId: appState.lastConnectedDeviceId,
+          connectedDevice: appState.connectedDevice,
+          onStartScan: _startScan,
+          onStopScan: _stopScan,
+          onSelectDevice: (deviceId) {
+            setState(() {
+              _selectedDeviceId = deviceId;
+            });
+            appState.setLastConnectedDeviceId(deviceId);
+            Navigator.pop(sheetCtx);
+          },
+          onDisconnect: () {
+            _disconnectAndPauseScan(appState);
+            Navigator.pop(sheetCtx);
+          },
+          onForget: () {
+            _disconnectAndPauseScan(appState);
+            appState.setLastConnectedDeviceId(null);
+            Navigator.pop(sheetCtx);
+          },
+        );
+      },
     );
   }
 
-  // ==================== WEIGHT DIALOG ====================
+  /// The real Disconnect — stop the BLE radio AND clear connected state.
+  /// Without stopping the scan, _processScanResult would re-pair to the
+  /// very next advertisement and the user would never see "disconnected".
+  ///
+  /// _userPausedScan = true tells the watchdog and the lifecycle hook to
+  /// leave the radio off until the user explicitly taps SCAN again.
+  void _disconnectAndPauseScan(AppState appState) {
+    setState(() {
+      _selectedDeviceId = null;
+      _scanResults.clear();
+      _userPausedScan = true;
+    });
+    if (Platform.isAndroid || Platform.isIOS) {
+      FlutterBluePlus.stopScan();
+    }
+    appState.setScanning(false);
+    appState.disconnectDevice();
+  }
 
   void _showWeightDialog() {
     final appState = context.read<AppState>();
@@ -284,15 +346,11 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  // ==================== NEW SESSION CONFIRMATION ====================
-
   void _confirmNewSession(AppState appState) {
-    // Skip confirmation if current session is empty
     if (!appState.hasActiveSession || appState.shotCount == 0) {
       appState.startNewSession();
       return;
     }
-
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
@@ -322,124 +380,241 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  // ==================== DEMO MODE ====================
-
   void _recordDemoShot(AppState appState) {
     if (_demoGenerator == null) return;
     final velocity = _demoGenerator!.generateVelocity();
     appState.recordShot(velocity);
   }
 
-  // ==================== BUILD ====================
+  String _altVelocity(AppState appState) {
+    final fps = appState.lastVelocityFps;
+    if (fps <= 0) return '';
+    if (appState.useFps) {
+      return (fps * 0.3048).toStringAsFixed(0);
+    }
+    return fps.toString();
+  }
+
+  String _ftLbsValue(AppState appState) {
+    final fps = appState.lastVelocityFps;
+    if (fps <= 0) return '';
+    return ((appState.bulletWeightGrains * fps * fps) / 450240.0)
+        .toStringAsFixed(1);
+  }
+
+  String _joulesValue(AppState appState) {
+    final fps = appState.lastVelocityFps;
+    if (fps <= 0) return '';
+    final grams = appState.bulletWeightGrains * 0.0648;
+    final ms = fps * 0.3048;
+    return ((grams * ms * ms) / 2000.0).toStringAsFixed(1);
+  }
 
   @override
   Widget build(BuildContext context) {
     final appState = context.watch<AppState>();
     final isCompact = Responsive.isCompact(context);
-    final listMaxHeight = isCompact ? 160.0 : 220.0;
-    final heroSpacing = isCompact ? 16.0 : 24.0;
-    final statSpacing = isCompact ? 12.0 : 16.0;
-    final buttonSpacing = isCompact ? 8.0 : 12.0;
+    final listMaxHeight = isCompact ? 180.0 : 240.0;
+    final blockGap = isCompact ? 12.0 : 14.0;
+    final session = appState.currentSession;
 
     return Scaffold(
       backgroundColor: AppColors.background,
       body: SafeArea(
         child: Column(
           children: [
-            // Device Status Bar
-            DeviceStatusBar(
-              device: appState.connectedDevice,
-              isScanning: appState.isScanning,
-              isReconnecting: appState.isDeviceLost && _selectedDeviceId != null,
-              isTimedOut: appState.isReconnectTimedOut,
-              onTap: _showDeviceDrawer,
+            // Top status row — BLE pill left, app brand right
+            Padding(
+              padding: EdgeInsets.fromLTRB(16, isCompact ? 8 : 12, 16,
+                  isCompact ? 4 : 6),
+              child: Row(
+                children: [
+                  DeviceStatusBar(
+                    device: appState.connectedDevice,
+                    isScanning: appState.isScanning,
+                    isReconnecting:
+                        appState.isDeviceLost && _selectedDeviceId != null,
+                    isTimedOut: appState.isReconnectTimedOut,
+                    onTap: _showDeviceDrawer,
+                  ),
+                  const Spacer(),
+                  const Text(
+                    'CHRONO',
+                    style: TextStyle(
+                      fontFamily: AppFonts.numerals,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w800,
+                      color: AppColors.textPrimary,
+                      letterSpacing: 2.4,
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: AppColors.accent.withValues(alpha: 0.18),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: const Text(
+                      'LITE',
+                      style: TextStyle(
+                        fontSize: 9,
+                        fontWeight: FontWeight.w800,
+                        color: AppColors.accent,
+                        letterSpacing: 1.0,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
 
-            // Main content
             Expanded(
               child: SingleChildScrollView(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
+                padding:
+                    EdgeInsets.fromLTRB(16, isCompact ? 8 : 10, 16, 16),
                 child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    SizedBox(height: heroSpacing),
-
-                    // Large velocity display
                     VelocityDisplay(
-                      value: appState.lastVelocityFps > 0
+                      primaryValue: appState.lastVelocityFps > 0
                           ? appState.formatVelocity(appState.lastVelocityFps)
                           : '',
-                      unit: appState.velocityUnitLabel,
+                      primaryUnit: appState.velocityUnitLabel,
+                      altValue: _altVelocity(appState),
+                      altUnit: appState.useFps ? 'm/s' : 'fps',
+                      shotIndex: appState.shotCount,
+                      shotTotal: appState.shotCount,
                       isConnected: appState.isConnected,
+                      hasShots: appState.shotCount > 0,
+                      averageFps: appState.averageFps,
+                      standardDeviationFps: appState.standardDeviationFps,
+                      velocityFps: appState.lastVelocityFps,
+                      useFps: appState.useFps,
                       onTap: () => appState.toggleVelocityUnit(),
                     ),
-
-                    // Energy display with weight icon
+                    SizedBox(height: blockGap),
                     EnergyDisplay(
-                      value: appState.lastVelocityFps > 0
-                          ? appState.formatEnergy(appState.lastVelocityFps)
-                          : '',
-                      unit: appState.energyUnitLabel,
+                      ftLbsValue: _ftLbsValue(appState),
+                      joulesValue: _joulesValue(appState),
+                      useFtLbs: appState.useFtLbs,
+                      weightLabel:
+                          '${appState.bulletWeightGrains.toStringAsFixed(1)}gr',
                       onTap: () => appState.toggleEnergyUnit(),
                       onWeightTap: _showWeightDialog,
                     ),
 
-                    SizedBox(height: heroSpacing),
+                    if (session != null && session.shots.isNotEmpty) ...[
+                      SizedBox(height: blockGap),
+                      Container(
+                        padding: EdgeInsets.all(isCompact ? 12 : 14),
+                        decoration: BoxDecoration(
+                          color: AppColors.surface,
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(color: AppColors.border),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            const Padding(
+                              padding: EdgeInsets.only(bottom: 8, left: 2),
+                              child: Text(
+                                'TREND',
+                                style: TextStyle(
+                                  fontSize: 9,
+                                  fontWeight: FontWeight.w700,
+                                  color: AppColors.textTertiary,
+                                  letterSpacing: 1.4,
+                                ),
+                              ),
+                            ),
+                            TrendChart(
+                              shots: session.shots,
+                              meanFps: appState.averageFps,
+                              sdFps: appState.standardDeviationFps,
+                              useFps: appState.useFps,
+                              unitLabel: appState.velocityUnitLabel,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
 
-                    // Statistics row
+                    SizedBox(height: blockGap),
                     StatisticsRow(
-                      average: appState.formatAverageVelocity(appState.averageFps),
-                      extremeSpread: appState.formatExtremeSpread(appState.extremeSpreadFps),
-                      standardDeviation: appState.formatStandardDeviation(appState.standardDeviationFps),
+                      average: appState
+                          .formatAverageVelocity(appState.averageFps),
+                      extremeSpread: appState
+                          .formatExtremeSpread(appState.extremeSpreadFps),
+                      standardDeviation: appState
+                          .formatStandardDeviation(appState.standardDeviationFps),
+                      minValue: appState.formatVelocity(appState.minFps),
+                      maxValue: appState.formatVelocity(appState.maxFps),
+                      count: appState.shotCount,
                       unit: appState.velocityUnitLabel,
                       showStats: appState.hasStatistics,
                       shotCount: appState.shotCount,
                     ),
 
-                    SizedBox(height: statSpacing),
-
-                    // Shot count indicator
-                    if (appState.hasActiveSession) ...[
-                      Container(
-                        padding: EdgeInsets.symmetric(
-                          horizontal: isCompact ? 10 : 12,
-                          vertical: isCompact ? 5 : 6,
-                        ),
-                        decoration: BoxDecoration(
-                          color: AppColors.primary.withOpacity(0.1),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Text(
-                          '${appState.shotCount} shot${appState.shotCount == 1 ? '' : 's'}',
-                          style: const TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w500,
-                            color: AppColors.primary,
-                          ),
-                        ),
-                      ),
-                      SizedBox(height: statSpacing),
-                    ],
-
-                    // Shot history list
+                    SizedBox(height: blockGap),
                     Container(
-                      constraints: BoxConstraints(maxHeight: listMaxHeight),
                       decoration: BoxDecoration(
                         color: AppColors.surface,
-                        borderRadius: BorderRadius.circular(12),
+                        borderRadius: BorderRadius.circular(14),
                         border: Border.all(color: AppColors.border),
                       ),
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(12),
-                        child: ShotList(
-                          shots: appState.currentSession?.shots ?? [],
-                          formatVelocity: appState.formatVelocity,
-                          unit: appState.velocityUnitLabel,
-                          maxHeight: listMaxHeight,
-                        ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
+                            child: Row(
+                              children: [
+                                const Text(
+                                  'RECENT SHOTS',
+                                  style: TextStyle(
+                                    fontSize: 9,
+                                    fontWeight: FontWeight.w700,
+                                    color: AppColors.textTertiary,
+                                    letterSpacing: 1.4,
+                                  ),
+                                ),
+                                const Spacer(),
+                                if (appState.hasActiveSession)
+                                  Text(
+                                    '${appState.shotCount} total',
+                                    style: const TextStyle(
+                                      fontFamily: AppFonts.mono,
+                                      fontSize: 10,
+                                      color: AppColors.textTertiary,
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ),
+                          ClipRRect(
+                            borderRadius: const BorderRadius.only(
+                              bottomLeft: Radius.circular(13),
+                              bottomRight: Radius.circular(13),
+                            ),
+                            child: ShotList(
+                              shots: session?.shots ?? const [],
+                              formatVelocity: appState.formatVelocity,
+                              formatEnergy: appState.formatEnergy,
+                              velocityUnit: appState.velocityUnitLabel,
+                              energyUnit: appState.energyUnitLabel,
+                              averageFps: appState.averageFps,
+                              standardDeviationFps:
+                                  appState.standardDeviationFps,
+                              sessionStart: session?.createdAt,
+                              useFps: appState.useFps,
+                              maxHeight: listMaxHeight,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
-
-                    SizedBox(height: heroSpacing),
                   ],
                 ),
               ),
@@ -447,310 +622,86 @@ class _HomePageState extends State<HomePage> {
 
             // Bottom action bar
             Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
+              padding: EdgeInsets.fromLTRB(
+                  16, 10, 16, isCompact ? 10 : 14),
+              decoration: const BoxDecoration(
                 color: AppColors.surface,
                 border: Border(
                   top: BorderSide(color: AppColors.border),
                 ),
               ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  // Action buttons
-                  LayoutBuilder(
-                    builder: (context, constraints) {
-                      final isNarrow = constraints.maxWidth < 360;
-                      final spacing = isNarrow ? 8.0 : buttonSpacing;
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final isNarrow = constraints.maxWidth < 360;
+                  final spacing = isNarrow ? 8.0 : 10.0;
 
-                      final newSessionButton = ElevatedButton.icon(
-                        onPressed: () => _confirmNewSession(appState),
-                        icon: const Icon(Icons.add, size: 20),
-                        label: const Text('New Session'),
-                        style: ElevatedButton.styleFrom(
-                          minimumSize: const Size.fromHeight(44),
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 16,
-                            vertical: 12,
-                          ),
-                          backgroundColor: AppColors.primary,
-                          foregroundColor: AppColors.background,
+                  final newSessionButton = ElevatedButton.icon(
+                    onPressed: () => _confirmNewSession(appState),
+                    icon: const Icon(Icons.add, size: 18),
+                    label: const Text('NEW'),
+                  );
+                  final historyButton = OutlinedButton.icon(
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => const SessionHistoryPage(),
                         ),
-                      );
-
-                      final historyButton = OutlinedButton.icon(
-                        onPressed: () {
-                          Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (context) => const SessionHistoryPage(),
-                            ),
-                          );
-                        },
-                        icon: const Icon(Icons.history, size: 20),
-                        label: const Text('History'),
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: AppColors.textPrimary,
-                          minimumSize: const Size.fromHeight(44),
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 16,
-                            vertical: 12,
-                          ),
-                          side: const BorderSide(color: AppColors.border),
-                        ),
-                      );
-
-                      // Demo button (only shown when kDemoMode is true)
-                      Widget? demoButton;
-                      if (AppConfig.kDemoMode && _demoGenerator != null) {
-                        demoButton = OutlinedButton.icon(
-                          onPressed: () => _recordDemoShot(appState),
-                          icon: const Icon(Icons.science_outlined, size: 20),
-                          label: const Text('Demo'),
-                          style: OutlinedButton.styleFrom(
-                            foregroundColor: AppColors.warning,
-                            minimumSize: const Size.fromHeight(44),
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 16,
-                              vertical: 12,
-                            ),
-                            side: const BorderSide(color: AppColors.warning),
-                          ),
-                        );
-                      }
-
-                      if (isNarrow) {
-                        return Column(
-                          children: [
-                            SizedBox(
-                              width: double.infinity,
-                              child: newSessionButton,
-                            ),
-                            SizedBox(height: spacing),
-                            SizedBox(
-                              width: double.infinity,
-                              child: historyButton,
-                            ),
-                            if (demoButton != null) ...[
-                              SizedBox(height: spacing),
-                              SizedBox(
-                                width: double.infinity,
-                                child: demoButton,
-                              ),
-                            ],
-                          ],
-                        );
-                      }
-
-                      // Wide layout
-                      if (demoButton != null) {
-                        return Row(
-                          children: [
-                            Expanded(child: newSessionButton),
-                            SizedBox(width: spacing),
-                            Expanded(child: historyButton),
-                            SizedBox(width: spacing),
-                            Expanded(child: demoButton),
-                          ],
-                        );
-                      }
-
-                      return Row(
-                        children: [
-                          Expanded(child: newSessionButton),
-                          SizedBox(width: spacing),
-                          Expanded(child: historyButton),
-                        ],
                       );
                     },
-                  ),
-                ],
+                    icon: const Icon(Icons.history, size: 18),
+                    label: const Text('HISTORY'),
+                  );
+                  Widget? demoButton;
+                  if (AppConfig.kDemoMode && _demoGenerator != null) {
+                    demoButton = OutlinedButton.icon(
+                      onPressed: () => _recordDemoShot(appState),
+                      icon: const Icon(Icons.science_outlined, size: 18),
+                      label: const Text('DEMO'),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: AppColors.warn,
+                        side: const BorderSide(color: AppColors.warn),
+                      ),
+                    );
+                  }
+
+                  if (isNarrow) {
+                    return Column(
+                      children: [
+                        SizedBox(width: double.infinity, child: newSessionButton),
+                        SizedBox(height: spacing),
+                        SizedBox(width: double.infinity, child: historyButton),
+                        if (demoButton != null) ...[
+                          SizedBox(height: spacing),
+                          SizedBox(width: double.infinity, child: demoButton),
+                        ],
+                      ],
+                    );
+                  }
+
+                  if (demoButton != null) {
+                    return Row(
+                      children: [
+                        Expanded(child: newSessionButton),
+                        SizedBox(width: spacing),
+                        Expanded(child: historyButton),
+                        SizedBox(width: spacing),
+                        Expanded(child: demoButton),
+                      ],
+                    );
+                  }
+                  return Row(
+                    children: [
+                      Expanded(child: newSessionButton),
+                      SizedBox(width: spacing),
+                      Expanded(child: historyButton),
+                    ],
+                  );
+                },
               ),
             ),
           ],
         ),
-      ),
-    );
-  }
-}
-
-// ==================== DEVICE DRAWER ====================
-
-class _DeviceDrawer extends StatelessWidget {
-  final List<ScanResult> scanResults;
-  final bool isScanning;
-  final String? selectedDeviceId;
-  final VoidCallback onStartScan;
-  final VoidCallback onStopScan;
-  final ValueChanged<String> onSelectDevice;
-  final VoidCallback onDisconnect;
-
-  const _DeviceDrawer({
-    required this.scanResults,
-    required this.isScanning,
-    required this.selectedDeviceId,
-    required this.onStartScan,
-    required this.onStopScan,
-    required this.onSelectDevice,
-    required this.onDisconnect,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      constraints: BoxConstraints(
-        maxHeight: MediaQuery.of(context).size.height * 0.6,
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Header
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text(
-                'Devices',
-                style: TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.w600,
-                  color: AppColors.textPrimary,
-                ),
-              ),
-              if (selectedDeviceId != null)
-                TextButton(
-                  onPressed: onDisconnect,
-                  child: const Text(
-                    'Disconnect',
-                    style: TextStyle(color: AppColors.error),
-                  ),
-                ),
-            ],
-          ),
-          const SizedBox(height: 16),
-
-          // Scan button
-          SizedBox(
-            width: double.infinity,
-            child: ElevatedButton.icon(
-              onPressed: isScanning ? onStopScan : onStartScan,
-              icon: Icon(
-                isScanning ? Icons.stop : Icons.bluetooth_searching,
-                size: 20,
-              ),
-              label: Text(isScanning ? 'Stop Scanning' : 'Scan for Devices'),
-              style: ElevatedButton.styleFrom(
-                minimumSize: const Size.fromHeight(44),
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                backgroundColor:
-                    isScanning ? AppColors.error : AppColors.primary,
-                foregroundColor: AppColors.background,
-              ),
-            ),
-          ),
-          const SizedBox(height: 16),
-
-          // Info text
-          Text(
-            'Scanning for Chrono Litegraph devices...',
-            style: const TextStyle(
-              fontSize: 14,
-              color: AppColors.textTertiary,
-            ),
-          ),
-          const SizedBox(height: 16),
-
-          // Device list
-          Expanded(
-            child: scanResults.isEmpty
-                ? Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          isScanning
-                              ? Icons.bluetooth_searching
-                              : Icons.bluetooth_disabled,
-                          size: 48,
-                          color: AppColors.textTertiary,
-                        ),
-                        const SizedBox(height: 16),
-                        Text(
-                          isScanning
-                              ? 'Scanning...'
-                              : 'No devices found\nTap scan to search',
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(
-                            fontSize: 16,
-                            color: AppColors.textSecondary,
-                          ),
-                        ),
-                      ],
-                    ),
-                  )
-                : ListView.builder(
-                    itemCount: scanResults.length,
-                    itemBuilder: (context, index) {
-                      final result = scanResults[index];
-                      final isSelected =
-                          result.device.remoteId.str == selectedDeviceId;
-
-                      // Parse broadcast data for display
-                      final nordicData =
-                          result.advertisementData.manufacturerData[0x0059];
-                      final broadcastData = nordicData != null
-                          ? BroadcastParser.parse(nordicData)
-                          : BroadcastData.invalid();
-
-                      return ListTile(
-                        leading: Container(
-                          padding: const EdgeInsets.all(8),
-                          decoration: BoxDecoration(
-                            color: isSelected
-                                ? AppColors.success.withOpacity(0.15)
-                                : AppColors.surfaceElevated,
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Icon(
-                            isSelected
-                                ? Icons.bluetooth_connected
-                                : Icons.bluetooth,
-                            color: isSelected
-                                ? AppColors.success
-                                : AppColors.textSecondary,
-                          ),
-                        ),
-                        title: Text(
-                          result.device.platformName.isNotEmpty
-                              ? result.device.platformName
-                              : broadcastData.deviceName,
-                          style: TextStyle(
-                            fontWeight: isSelected
-                                ? FontWeight.w600
-                                : FontWeight.w400,
-                            color: AppColors.textPrimary,
-                          ),
-                        ),
-                        subtitle: Text(
-                          'RSSI: ${result.rssi} dBm • Battery: ${broadcastData.batteryPercent}%',
-                          style: const TextStyle(
-                            fontSize: 12,
-                            color: AppColors.textSecondary,
-                          ),
-                        ),
-                        trailing: isSelected
-                            ? const Icon(
-                                Icons.check_circle,
-                                color: AppColors.success,
-                              )
-                            : null,
-                        onTap: () => onSelectDevice(result.device.remoteId.str),
-                      );
-                    },
-                  ),
-          ),
-        ],
       ),
     );
   }
