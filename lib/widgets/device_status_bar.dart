@@ -2,23 +2,13 @@ import 'package:flutter/material.dart';
 import '../models/chronograph_device.dart';
 import '../theme/app_theme.dart';
 
-/// Device status bar showing connection state, device name, and battery.
-///
-/// Tap to open device scanner or show device info.
+/// Compact BLE status pill — replaces the previous full-width bar so the
+/// status chip can anchor top-left without crowding the hero velocity.
 class DeviceStatusBar extends StatelessWidget {
-  /// Connected device (null if not connected)
   final ChronographDevice? device;
-
-  /// Whether currently scanning for devices
   final bool isScanning;
-
-  /// Whether attempting to reconnect to a lost device
   final bool isReconnecting;
-
-  /// Whether reconnection attempt has timed out
   final bool isTimedOut;
-
-  /// Callback when tapped
   final VoidCallback onTap;
 
   const DeviceStatusBar({
@@ -32,68 +22,56 @@ class DeviceStatusBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isConnected = device != null && !device!.isLost;
-    final isLost = device != null && device!.isLost;
+    final state = _resolveState();
 
     return GestureDetector(
       onTap: onTap,
+      behavior: HitTestBehavior.opaque,
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         decoration: BoxDecoration(
           color: AppColors.surface,
-          border: Border(
-            bottom: BorderSide(color: AppColors.border),
-          ),
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(color: AppColors.border),
         ),
         child: Row(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            // Connection indicator
-            _ConnectionIndicator(
-              isConnected: isConnected,
-              isLost: isLost,
-              isScanning: isScanning,
-              isReconnecting: isReconnecting,
-              isTimedOut: isTimedOut,
-            ),
-            const SizedBox(width: 12),
-
-            // Device name or status text
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    _getTitle(isConnected, isLost, isScanning, isReconnecting, isTimedOut),
-                    style: const TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w500,
-                      color: AppColors.textPrimary,
-                    ),
-                  ),
-                  if (isConnected && device != null) ...[
-                    const SizedBox(height: 2),
-                    Text(
-                      device!.typeName,
-                      style: const TextStyle(
-                        fontSize: 12,
-                        color: AppColors.textTertiary,
-                      ),
-                    ),
-                  ],
-                ],
+            _Dot(color: state.color, pulse: state.pulse),
+            const SizedBox(width: 8),
+            Text(
+              state.label,
+              style: const TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: AppColors.textPrimary,
+                letterSpacing: 0.3,
               ),
             ),
-
-            // Battery indicator (if connected)
-            if (isConnected && device != null) ...[
-              _BatteryIndicator(percentage: device!.batteryPercent),
-              const SizedBox(width: 12),
+            if (device != null && !state.disconnected) ...[
+              const SizedBox(width: 8),
+              Container(width: 1, height: 12, color: AppColors.border),
+              const SizedBox(width: 8),
+              Icon(
+                _batteryIcon(device!.batteryPercent),
+                size: 14,
+                color: _batteryColor(device!.batteryPercent),
+              ),
+              const SizedBox(width: 3),
+              Text(
+                '${device!.batteryPercent}%',
+                style: TextStyle(
+                  fontFamily: AppFonts.mono,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  color: _batteryColor(device!.batteryPercent),
+                ),
+              ),
             ],
-
-            // Chevron
-            Icon(
+            const SizedBox(width: 6),
+            const Icon(
               Icons.chevron_right,
+              size: 14,
               color: AppColors.textTertiary,
             ),
           ],
@@ -102,171 +80,121 @@ class DeviceStatusBar extends StatelessWidget {
     );
   }
 
-  String _getTitle(bool isConnected, bool isLost, bool isScanning, bool isReconnecting, bool isTimedOut) {
-    if (isLost && isTimedOut) return 'Connection lost';
-    if (isLost && isReconnecting) return 'Reconnecting...';
-    if (isScanning) return 'Scanning...';
-    if (isLost) return 'Device Lost';
-    if (isConnected && device != null) return device!.name;
-    return 'Tap to connect';
+  _State _resolveState() {
+    final isConnected = device != null && !device!.isLost;
+    final isLost = device != null && device!.isLost;
+
+    if (isLost && isTimedOut) {
+      return _State(label: 'Lost', color: AppColors.danger);
+    }
+    if (isLost && isReconnecting) {
+      return _State(label: 'Reconnecting', color: AppColors.warn, pulse: true);
+    }
+    if (isLost) {
+      return _State(label: 'Lost', color: AppColors.danger);
+    }
+    if (isConnected) {
+      return _State(label: device!.name, color: AppColors.good);
+    }
+    if (isScanning) {
+      return _State(label: 'Scanning', color: AppColors.warn, pulse: true);
+    }
+    return _State(
+      label: 'Tap to connect',
+      color: AppColors.textTertiary,
+      disconnected: true,
+    );
+  }
+
+  IconData _batteryIcon(int pct) {
+    if (pct > 80) return Icons.battery_full;
+    if (pct > 60) return Icons.battery_5_bar;
+    if (pct > 40) return Icons.battery_4_bar;
+    if (pct > 20) return Icons.battery_2_bar;
+    return Icons.battery_1_bar;
+  }
+
+  Color _batteryColor(int pct) {
+    if (pct > 50) return AppColors.good;
+    if (pct > 20) return AppColors.warn;
+    return AppColors.danger;
   }
 }
 
-class _ConnectionIndicator extends StatefulWidget {
-  final bool isConnected;
-  final bool isLost;
-  final bool isScanning;
-  final bool isReconnecting;
-  final bool isTimedOut;
+class _State {
+  final String label;
+  final Color color;
+  final bool pulse;
+  final bool disconnected;
 
-  const _ConnectionIndicator({
-    required this.isConnected,
-    required this.isLost,
-    required this.isScanning,
-    required this.isReconnecting,
-    required this.isTimedOut,
+  _State({
+    required this.label,
+    required this.color,
+    this.pulse = false,
+    this.disconnected = false,
   });
-
-  @override
-  State<_ConnectionIndicator> createState() => _ConnectionIndicatorState();
 }
 
-class _ConnectionIndicatorState extends State<_ConnectionIndicator>
-    with SingleTickerProviderStateMixin {
-  late AnimationController _pulseController;
-  late Animation<double> _pulseAnimation;
+class _Dot extends StatefulWidget {
+  final Color color;
+  final bool pulse;
+
+  const _Dot({required this.color, required this.pulse});
+
+  @override
+  State<_Dot> createState() => _DotState();
+}
+
+class _DotState extends State<_Dot> with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl;
 
   @override
   void initState() {
     super.initState();
-    _pulseController = AnimationController(
-      duration: const Duration(milliseconds: 1000),
+    _ctrl = AnimationController(
       vsync: this,
+      duration: const Duration(milliseconds: 1000),
     );
-    _pulseAnimation = Tween<double>(begin: 0.6, end: 1.0).animate(
-      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
-    );
-    // Start animation if already reconnecting on initial build (not timed out)
-    if (widget.isReconnecting && widget.isLost && !widget.isTimedOut) {
-      _pulseController.repeat(reverse: true);
-    }
+    if (widget.pulse) _ctrl.repeat(reverse: true);
   }
 
   @override
-  void didUpdateWidget(_ConnectionIndicator oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (widget.isReconnecting && widget.isLost && !widget.isTimedOut) {
-      _pulseController.repeat(reverse: true);
-    } else {
-      _pulseController.stop();
-      _pulseController.value = 1.0;
+  void didUpdateWidget(_Dot old) {
+    super.didUpdateWidget(old);
+    if (widget.pulse && !_ctrl.isAnimating) {
+      _ctrl.repeat(reverse: true);
+    } else if (!widget.pulse && _ctrl.isAnimating) {
+      _ctrl.stop();
+      _ctrl.value = 1.0;
     }
   }
 
   @override
   void dispose() {
-    _pulseController.dispose();
+    _ctrl.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    Color color;
-    IconData icon;
-
-    if (widget.isLost && widget.isTimedOut) {
-      // Timed out - show error state
-      color = AppColors.error;
-      icon = Icons.bluetooth_disabled;
-    } else if (widget.isLost && widget.isReconnecting) {
-      // Reconnecting - show warning state with animation
-      color = AppColors.warning;
-      icon = Icons.bluetooth_searching;
-    } else if (widget.isScanning) {
-      color = AppColors.warning;
-      icon = Icons.bluetooth_searching;
-    } else if (widget.isLost) {
-      color = AppColors.error;
-      icon = Icons.bluetooth_disabled;
-    } else if (widget.isConnected) {
-      color = AppColors.success;
-      icon = Icons.bluetooth_connected;
-    } else {
-      color = AppColors.textTertiary;
-      icon = Icons.bluetooth;
-    }
-
-    final indicator = Container(
-      padding: const EdgeInsets.all(8),
+    final dot = Container(
+      width: 8,
+      height: 8,
       decoration: BoxDecoration(
-        color: color.withOpacity(0.15),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Icon(
-        icon,
-        size: 20,
-        color: color,
-      ),
-    );
-
-    // Animate when reconnecting (not timed out)
-    if (widget.isLost && widget.isReconnecting && !widget.isTimedOut) {
-      return AnimatedBuilder(
-        animation: _pulseAnimation,
-        builder: (context, child) => Opacity(
-          opacity: _pulseAnimation.value,
-          child: child,
-        ),
-        child: indicator,
-      );
-    }
-
-    return indicator;
-  }
-}
-
-class _BatteryIndicator extends StatelessWidget {
-  final int percentage;
-
-  const _BatteryIndicator({required this.percentage});
-
-  @override
-  Widget build(BuildContext context) {
-    Color color;
-    if (percentage > 50) {
-      color = AppColors.success;
-    } else if (percentage > 20) {
-      color = AppColors.warning;
-    } else {
-      color = AppColors.error;
-    }
-
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Icon(
-          _getBatteryIcon(),
-          size: 20,
-          color: color,
-        ),
-        const SizedBox(width: 4),
-        Text(
-          '$percentage%',
-          style: TextStyle(
-            fontSize: 14,
-            fontWeight: FontWeight.w500,
-            color: color,
+        color: widget.color,
+        shape: BoxShape.circle,
+        boxShadow: [
+          BoxShadow(
+            color: widget.color.withValues(alpha: 0.5),
+            blurRadius: 6,
           ),
-        ),
-      ],
+        ],
+      ),
     );
-  }
-
-  IconData _getBatteryIcon() {
-    if (percentage > 80) return Icons.battery_full;
-    if (percentage > 60) return Icons.battery_5_bar;
-    if (percentage > 40) return Icons.battery_4_bar;
-    if (percentage > 20) return Icons.battery_2_bar;
-    return Icons.battery_1_bar;
+    if (!widget.pulse) return dot;
+    return FadeTransition(
+      opacity: Tween<double>(begin: 0.4, end: 1.0).animate(_ctrl),
+      child: dot,
+    );
   }
 }

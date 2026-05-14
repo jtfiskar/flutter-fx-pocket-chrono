@@ -66,6 +66,16 @@ class Session {
     return maxFps - minFps;
   }
 
+  /// Median velocity in FPS (population median; averages the two middle
+  /// values on even-length samples).
+  double get medianFps {
+    if (shots.isEmpty) return 0;
+    final sorted = shots.map((s) => s.velocityFps).toList()..sort();
+    final mid = sorted.length ~/ 2;
+    if (sorted.length.isOdd) return sorted[mid].toDouble();
+    return (sorted[mid - 1] + sorted[mid]) / 2.0;
+  }
+
   /// Standard deviation in FPS
   double get standardDeviationFps {
     if (shots.length < 2) return 0;

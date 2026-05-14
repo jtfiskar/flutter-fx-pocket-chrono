@@ -42,11 +42,22 @@ flutter:
       fonts:
         - asset: assets/fonts/JetBrainsMono-Bold.ttf
           weight: 700
+    - family: SairaCondensed
+      fonts:
+        - asset: assets/fonts/SairaCondensed-Regular.ttf
+          weight: 400
+        - asset: assets/fonts/SairaCondensed-Bold.ttf
+          weight: 700
+        - asset: assets/fonts/SairaCondensed-ExtraBold.ttf
+          weight: 800
 
 flutter_launcher_icons:
   android: true
   ios: true
-  image_path: "icon/fx-icon-crosshair-gold-1024.png"
-  adaptive_icon_foreground: "icon/fx-icon-crosshair-gold-1024.png"
-  adaptive_icon_background: "#141414"
+  # Full-bleed square — no rounded corners in source. iOS applies its
+  # squircle mask and Android applies its adaptive-icon shape on their
+  # own; rounding the source would just compound the mask.
+  image_path: "icon/fx-icon-mark-1024.png"
+  adaptive_icon_foreground: "icon/fx-icon-mark-foreground-1024.png"
+  adaptive_icon_background: "#FFC14A"
   remove_alpha_ios: true

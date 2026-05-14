@@ -15,19 +15,7 @@
                     </layoutGuides>
                     <view key="view" contentMode="scaleToFill" id="Ze5-6b-2t3">
                         <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
-                        <subviews>
-                            <imageView opaque="NO" clipsSubviews="YES" multipleTouchEnabled="YES" contentMode="scaleAspectFit" image="SplashIcon" translatesAutoresizingMaskIntoConstraints="NO" id="compass-view">
-                                <constraints>
-                                    <constraint firstAttribute="width" constant="150" id="compass-w"/>
-                                    <constraint firstAttribute="height" constant="150" id="compass-h"/>
-                                </constraints>
-                            </imageView>
-                        </subviews>
-                        <color key="backgroundColor" red="0.078" green="0.078" blue="0.078" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
-                        <constraints>
-                            <constraint firstItem="compass-view" firstAttribute="centerX" secondItem="Ze5-6b-2t3" secondAttribute="centerX" id="compass-x"/>
-                            <constraint firstItem="compass-view" firstAttribute="centerY" secondItem="Ze5-6b-2t3" secondAttribute="centerY" id="compass-y"/>
-                        </constraints>
+                        <color key="backgroundColor" red="0" green="0" blue="0" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
                     </view>
                 </viewController>
                 <placeholder placeholderIdentifier="IBFirstResponder" id="iYj-Kq-Ea1" userLabel="First Responder" sceneMemberID="firstResponder"/>
@@ -35,7 +23,4 @@
             <point key="canvasLocation" x="53" y="375"/>
         </scene>
     </scenes>
-    <resources>
-        <image name="SplashIcon" width="150" height="150"/>
-    </resources>
 </document>

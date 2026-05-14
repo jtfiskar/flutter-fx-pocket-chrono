@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="amber" x1="0" y1="0" x2="1" y2="1" gradientTransform="rotate(40 0.5 0.5)">
+      <stop offset="0%" stop-color="#FFD680"/>
+      <stop offset="50%" stop-color="#FFC14A"/>
+      <stop offset="100%" stop-color="#D99C1F"/>
+    </linearGradient>
+  </defs>
+  <!-- Full-bleed square. Phones round the corners on their own. -->
+  <rect width="1024" height="1024" fill="url(#amber)"/>
+  <!-- Velocity spike glyph from the design prototype (index.html .mark).
+       Original path was M4 12h4l2-6 4 12 2-6h4 on viewBox 0 0 24 24.
+       Scaled ×34 so 1.5 user-unit stroke ≈ 51 px in the 1024 raster,
+       matching the shipped fx-icon-mark-1024.png. -->
+  <g transform="translate(512 512) scale(34) translate(-12 -12)"
+     fill="none" stroke="#0A0E14" stroke-width="1.5"
+     stroke-linecap="round" stroke-linejoin="round">
+    <path d="M4 12h4l2-6 4 12 2-6h4"/>
+  </g>
+</svg>

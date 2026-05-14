@@ -54,6 +54,10 @@ app.*.map.json
 **/ios/ServiceDefinitions.json
 **/ios/Runner/GeneratedPluginRegistrant.*
 
+# Xcode per-user state (created on first open in Xcode)
+**/xcuserdata/
+**/*.xcuserstate
+
 # macOS
 **/macos/Flutter/GeneratedPluginRegistrant.swift
 **/macos/Flutter/ephemeral/

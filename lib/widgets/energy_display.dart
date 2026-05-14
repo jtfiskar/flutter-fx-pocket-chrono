@@ -2,27 +2,31 @@ import 'package:flutter/material.dart';
 import '../theme/app_theme.dart';
 import '../utils/responsive.dart';
 
-/// Energy display widget - shows calculated muzzle energy.
-///
-/// Tap energy to toggle between ft-lbs and Joules.
-/// Tap weight icon to open weight input dialog.
+/// Energy strip — shows ft·lbs and Joules side-by-side, with a weight
+/// button on the right. The unit currently preferred by the user is
+/// rendered in primary text; the alternate is muted.
 class EnergyDisplay extends StatelessWidget {
-  /// Energy value to display (formatted string)
-  final String value;
+  final String ftLbsValue;
+  final String joulesValue;
 
-  /// Unit label (e.g., "ft-lbs" or "J")
-  final String unit;
+  /// Which unit is the user's primary preference.
+  final bool useFtLbs;
 
-  /// Callback when energy display tapped (to toggle unit)
+  /// Bullet weight in grains (e.g. "16.0 gr").
+  final String weightLabel;
+
+  /// Tap on either energy cell toggles the primary unit.
   final VoidCallback? onTap;
 
-  /// Callback when weight icon tapped (to open weight dialog)
+  /// Tap on the weight button opens the weight dialog.
   final VoidCallback? onWeightTap;
 
   const EnergyDisplay({
     super.key,
-    required this.value,
-    required this.unit,
+    required this.ftLbsValue,
+    required this.joulesValue,
+    required this.useFtLbs,
+    required this.weightLabel,
     this.onTap,
     this.onWeightTap,
   });
@@ -30,72 +34,141 @@ class EnergyDisplay extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isCompact = Responsive.isCompact(context);
-    final valueSize = isCompact ? 24.0 : 28.0;
-    final unitSize = isCompact ? 16.0 : 18.0;
-    final iconSize = isCompact ? 14.0 : 16.0;
-    final verticalPadding = isCompact ? 6.0 : 8.0;
-    final textScale = Responsive.clampedTextScale(context, max: isCompact ? 1.1 : 1.2);
+    final valueSize = isCompact ? 22.0 : 24.0;
 
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        // Energy display (tappable for unit toggle)
-        GestureDetector(
-          onTap: onTap,
-          child: Container(
-            padding: EdgeInsets.symmetric(vertical: verticalPadding),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  value.isEmpty || value == '0.0' ? '---' : value,
-                  style: TextStyle(
-                    fontSize: valueSize,
-                    fontWeight: FontWeight.w500,
-                    color: AppColors.textPrimary,
-                  ),
-                  textScaleFactor: textScale,
-                ),
-                SizedBox(width: isCompact ? 6 : 8),
-                Text(
-                  unit,
-                  style: TextStyle(
-                    fontSize: unitSize,
-                    fontWeight: FontWeight.w400,
-                    color: AppColors.textSecondary,
-                  ),
-                  textScaleFactor: textScale,
-                ),
-                SizedBox(width: isCompact ? 3 : 4),
-                Icon(
-                  Icons.swap_horiz,
-                  size: iconSize,
-                  color: AppColors.toggleHint,
-                ),
-              ],
+    return Container(
+      padding: EdgeInsets.symmetric(
+        horizontal: isCompact ? 10 : 14,
+        vertical: isCompact ? 10 : 12,
+      ),
+      decoration: BoxDecoration(
+        color: AppColors.surfaceElevated,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: GestureDetector(
+              onTap: onTap,
+              behavior: HitTestBehavior.opaque,
+              child: _cell(
+                label: 'ENERGY',
+                value: ftLbsValue,
+                unit: 'ft·lbs',
+                emphasized: useFtLbs,
+                valueSize: valueSize,
+              ),
             ),
+          ),
+          Container(
+            width: 1,
+            height: 36,
+            color: AppColors.border,
+          ),
+          Expanded(
+            child: GestureDetector(
+              onTap: onTap,
+              behavior: HitTestBehavior.opaque,
+              child: _cell(
+                label: 'ENERGY',
+                value: joulesValue,
+                unit: 'J',
+                emphasized: !useFtLbs,
+                valueSize: valueSize,
+              ),
+            ),
+          ),
+          if (onWeightTap != null) ...[
+            const SizedBox(width: 8),
+            GestureDetector(
+              onTap: onWeightTap,
+              behavior: HitTestBehavior.opaque,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: AppColors.surface,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: AppColors.border),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    const Icon(
+                      Icons.fitness_center,
+                      size: 14,
+                      color: AppColors.textSecondary,
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      weightLabel,
+                      style: const TextStyle(
+                        fontFamily: AppFonts.mono,
+                        fontSize: 9,
+                        color: AppColors.textSecondary,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _cell({
+    required String label,
+    required String value,
+    required String unit,
+    required bool emphasized,
+    required double valueSize,
+  }) {
+    final display = value.isEmpty || value == '0.0' ? '—' : value;
+    final color = emphasized ? AppColors.textPrimary : AppColors.textTertiary;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        Text(
+          label,
+          style: const TextStyle(
+            fontSize: 9,
+            fontWeight: FontWeight.w600,
+            color: AppColors.textTertiary,
+            letterSpacing: 1.2,
           ),
         ),
-        // Weight icon button
-        if (onWeightTap != null) ...[
-          SizedBox(width: isCompact ? 12 : 16),
-          GestureDetector(
-            onTap: onWeightTap,
-            child: Container(
-              padding: EdgeInsets.all(isCompact ? 6 : 8),
-              decoration: BoxDecoration(
-                color: AppColors.surfaceElevated,
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Icon(
-                Icons.fitness_center,
-                size: isCompact ? 18 : 20,
-                color: AppColors.textSecondary,
+        const SizedBox(height: 4),
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.baseline,
+          textBaseline: TextBaseline.alphabetic,
+          children: [
+            Text(
+              display,
+              style: TextStyle(
+                fontFamily: AppFonts.numerals,
+                fontSize: valueSize,
+                fontWeight: FontWeight.w700,
+                color: color,
+                height: 1.0,
               ),
             ),
-          ),
-        ],
+            const SizedBox(width: 4),
+            Text(
+              unit,
+              style: TextStyle(
+                fontSize: 11,
+                color: color == AppColors.textPrimary
+                    ? AppColors.textSecondary
+                    : AppColors.textTertiary,
+              ),
+            ),
+          ],
+        ),
       ],
     );
   }
