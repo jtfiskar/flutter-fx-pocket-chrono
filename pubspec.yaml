@@ -1,0 +1,52 @@
+name: chrono_lite
+description: Chrono Lite — Flutter BLE chronograph client (compatible with FX Pocket V2 and D1)
+publish_to: 'none'
+version: 1.0.0+4
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.6
+  flutter_svg: ^2.0.10
+  # flutter_compass: removed - not needed for chronograph
+  permission_handler: ^11.3.1
+  flutter_blue_plus: ^1.32.7
+  # file_picker: removed - no OTA updates
+  # lottie: removed - simplifying UI
+  # nordic_dfu: removed - no OTA updates
+  shared_preferences: ^2.2.2
+  # xml: removed - no bullet database
+  provider: ^6.1.1
+  wakelock_plus: ^1.2.8
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+  flutter_launcher_icons: ^0.13.1
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/
+    - assets/icons/
+    # - assets/lottie/  # Removed - not using animations
+    # - assets/bullets/  # Removed - no bullet database
+
+  fonts:
+    - family: JetBrainsMono
+      fonts:
+        - asset: assets/fonts/JetBrainsMono-Bold.ttf
+          weight: 700
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "icon/fx-icon-crosshair-gold-1024.png"
+  adaptive_icon_foreground: "icon/fx-icon-crosshair-gold-1024.png"
+  adaptive_icon_background: "#141414"
+  remove_alpha_ios: true
