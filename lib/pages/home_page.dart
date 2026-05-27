@@ -956,13 +956,28 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               ),
               child: LayoutBuilder(
                 builder: (context, constraints) {
-                  final isNarrow = constraints.maxWidth < 360;
+                  // 400 covers iPhone Pro (393 pt logical width minus the
+                  // 32 px container padding → 361 inside): "HISTORY" + icon
+                  // + theme padding can't fit a 1/3-row cell at that size,
+                  // so the row was wrapping the Y onto a second line.
+                  final isNarrow = constraints.maxWidth < 400;
                   final spacing = isNarrow ? 8.0 : 10.0;
+
+                  // Belt + braces: even when we do end up in the row layout,
+                  // force single-line so the worst case is a fade-out rather
+                  // than a wrapped letter.
+                  const labelOverflow = TextOverflow.fade;
+                  Widget label(String text) => Text(
+                        text,
+                        maxLines: 1,
+                        softWrap: false,
+                        overflow: labelOverflow,
+                      );
 
                   final newSessionButton = ElevatedButton.icon(
                     onPressed: () => _confirmNewSession(appState),
                     icon: const Icon(Icons.add, size: 18),
-                    label: const Text('NEW'),
+                    label: label('NEW'),
                   );
                   final historyButton = OutlinedButton.icon(
                     onPressed: () {
@@ -974,14 +989,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                       );
                     },
                     icon: const Icon(Icons.history, size: 18),
-                    label: const Text('HISTORY'),
+                    label: label('HISTORY'),
                   );
                   Widget? demoButton;
                   if (AppConfig.kDemoMode && _demoGenerator != null) {
                     demoButton = OutlinedButton.icon(
                       onPressed: () => _recordDemoShot(appState),
                       icon: const Icon(Icons.science_outlined, size: 18),
-                      label: const Text('DEMO'),
+                      label: label('DEMO'),
                       style: OutlinedButton.styleFrom(
                         foregroundColor: AppColors.warn,
                         side: const BorderSide(color: AppColors.warn),
