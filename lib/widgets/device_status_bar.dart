@@ -6,6 +6,15 @@ import '../theme/app_theme.dart';
 /// status chip can anchor top-left without crowding the hero velocity.
 class DeviceStatusBar extends StatelessWidget {
   final ChronographDevice? device;
+
+  /// Authoritative connection state from AppState — GATT-aware, unlike
+  /// [ChronographDevice.isLost] which lags a dropped link by up to the
+  /// 3 s lastSeen window.
+  final bool isConnected;
+
+  /// Authoritative loss state from AppState (see [isConnected]).
+  final bool isLost;
+
   final bool isScanning;
   final bool isReconnecting;
   final bool isTimedOut;
@@ -14,6 +23,8 @@ class DeviceStatusBar extends StatelessWidget {
   const DeviceStatusBar({
     super.key,
     required this.device,
+    required this.isConnected,
+    required this.isLost,
     required this.isScanning,
     required this.onTap,
     this.isReconnecting = false,
@@ -48,7 +59,13 @@ class DeviceStatusBar extends StatelessWidget {
                 letterSpacing: 0.3,
               ),
             ),
-            if (device != null && !state.disconnected) ...[
+            // Battery chip — Pocket Pro exposes no battery over its VRS
+            // service (always 0), and a True Ballistic shows one only
+            // once its one-shot battery read has landed.
+            if (device != null &&
+                !state.disconnected &&
+                (device!.deviceType.isBroadcast ||
+                    device!.batteryPercent > 0)) ...[
               const SizedBox(width: 8),
               Container(width: 1, height: 12, color: AppColors.border),
               const SizedBox(width: 8),
@@ -81,9 +98,6 @@ class DeviceStatusBar extends StatelessWidget {
   }
 
   _State _resolveState() {
-    final isConnected = device != null && !device!.isLost;
-    final isLost = device != null && device!.isLost;
-
     if (isLost && isTimedOut) {
       return _State(label: 'Lost', color: AppColors.danger);
     }
