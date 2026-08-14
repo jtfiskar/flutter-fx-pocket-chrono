@@ -15,6 +15,9 @@ import '../widgets/pairing_drawer.dart';
 import '../widgets/trend_chart.dart';
 import '../widgets/weight_input.dart';
 import '../services/broadcast_parser.dart';
+import '../services/pocket_pro_client.dart';
+import '../services/true_ballistic_client.dart';
+import '../models/chronograph_device.dart';
 import '../utils/responsive.dart';
 import '../config/app_config.dart';
 import '../utils/demo_velocity_generator.dart';
@@ -47,6 +50,34 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// flight, which can race or stack permission dialogs.
   bool _scanStarting = false;
 
+  // Pocket Pro and True Ballistic are GATT-connected (not broadcast) so
+  // each gets its own client. At most one link is active at a time; the
+  // streams are wired into AppState and the client owns the
+  // BluetoothDevice connection.
+  final PocketProClient _pocketProClient = PocketProClient();
+  final TrueBallisticClient _trueBallisticClient = TrueBallisticClient();
+  StreamSubscription? _gattShotSub;
+  StreamSubscription<BluetoothConnectionState>? _gattConnectionSub;
+  // Device type per remoteId for adverts we've identified as GATT
+  // chronographs, so the selection callback can tell them from
+  // broadcast devices without re-running advert parsing.
+  final Map<String, ChronographDeviceType> _gattDeviceKinds =
+      <String, ChronographDeviceType>{};
+
+  /// Monotonic id for GATT connect attempts. Setup spans several awaits,
+  /// so a disconnect or a switch to another device mid-setup must be able
+  /// to invalidate the attempt already in flight — otherwise it resumes
+  /// after the teardown it was supposed to lose to, and wires its streams
+  /// (or connects) against a device the user has moved on from.
+  int _gattAttemptSeq = 0;
+
+  /// True while either GATT chronograph link is up or being established.
+  bool get _gattBusy =>
+      _pocketProClient.isConnected ||
+      _pocketProClient.isConnecting ||
+      _trueBallisticClient.isConnected ||
+      _trueBallisticClient.isConnecting;
+
   final DemoVelocityGenerator? _demoGenerator =
       AppConfig.kDemoMode ? DemoVelocityGenerator() : null;
 
@@ -67,6 +98,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _scanSubscription?.cancel();
     _deviceLossTimer?.cancel();
     _scanWatchdog?.cancel();
+    _gattShotSub?.cancel();
+    _gattConnectionSub?.cancel();
+    _pocketProClient.dispose();
+    _trueBallisticClient.dispose();
     if (Platform.isAndroid || Platform.isIOS) {
       FlutterBluePlus.stopScan();
     }
@@ -75,13 +110,32 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (!mounted) return;
+
+    // Drop the Pocket Pro GATT link as soon as the user backgrounds (or
+    // hides) the app — saves battery on both phone and chronograph and
+    // avoids a stale "connected" status when we resume. The resume
+    // branch below re-establishes it via the scan / advert path.
+    //
+    // `inactive` deliberately excluded: on iOS it fires for tiny
+    // transitions (notification banner, Control Center peek) and
+    // disconnecting on each would thrash the link.
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden) {
+      if (_gattBusy) {
+        _disconnectGattChrono();
+      }
+      return;
+    }
+
     // iOS pauses BLE scans when backgrounded (we have no service UUID to
     // filter by, so we can't run in the background). Android can throttle
     // long-running scans to opportunistic mode. On resume, restart the scan
-    // unless the user explicitly paused it via Disconnect/Forget.
+    // unless the user explicitly paused it via Disconnect/Forget — or a
+    // Pocket Pro GATT link is up, which deliberately keeps the scan off.
     if (state == AppLifecycleState.resumed &&
         !_userPausedScan &&
-        mounted) {
+        !_gattBusy) {
       _startScan();
     }
   }
@@ -108,6 +162,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _scanWatchdog = Timer.periodic(const Duration(seconds: 10), (_) {
       if (!mounted) return;
       if (_userPausedScan) return;
+      // A live GATT chronograph link deliberately keeps the scan off —
+      // concurrent scan + GATT degrades both on Android. The link-drop
+      // handler restarts the scan when the connection goes away.
+      if (_gattBusy) return;
       // Don't trample an in-flight permission/adapter check. Otherwise the
       // watchdog can re-enter _startScan while the user is still looking
       // at the OS permission dialog from the initial call.
@@ -213,52 +271,284 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         DateTime.now().difference(result.timeStamp).inMilliseconds;
     if (msSinceAdvert > 3000) return;
 
-    final manufacturerData = result.advertisementData.manufacturerData;
-    final nordicData = manufacturerData[0x0059];
+    final deviceId = result.device.remoteId.str;
+    final advData = result.advertisementData;
+    final localName = advData.advName.isNotEmpty
+        ? advData.advName
+        : result.device.platformName;
 
-    if (nordicData != null && BroadcastParser.isPocketDevice(nordicData)) {
+    final nordicData = advData.manufacturerData[0x0059];
+    final isBroadcastPocket =
+        nordicData != null && BroadcastParser.isPocketDevice(nordicData);
+    // Pocket Pro doesn't use manufacturer data — it advertises the VRS
+    // service UUID (and/or an "FX Pocket Pro" local name).
+    final isPocketPro = BroadcastParser.isPocketProAdvertisement(
+      serviceUuids: advData.serviceUuids.map((g) => g.str.toLowerCase()),
+      localName: localName,
+    );
+    // True Ballistic doesn't advertise its data service — it's matched
+    // by the vendor's obfuscated name prefix.
+    final isTrueBallistic = !isPocketPro &&
+        TrueBallisticClient.matchesAd(
+          advData.serviceUuids.map((g) => g.str.toLowerCase()),
+          localName,
+        );
+
+    if (isBroadcastPocket) {
       final broadcastData = BroadcastParser.parse(nordicData);
+      if (!broadcastData.isValid) return;
 
-      if (broadcastData.isValid) {
-        final deviceId = result.device.remoteId.str;
-        final appState = context.read<AppState>();
+      final appState = context.read<AppState>();
 
-        final savedDeviceId = appState.lastConnectedDeviceId;
-        final targetDeviceId = _selectedDeviceId ?? savedDeviceId;
-        final shouldConnect =
-            targetDeviceId == null || targetDeviceId == deviceId;
+      final savedDeviceId = appState.lastConnectedDeviceId;
+      final targetDeviceId = _selectedDeviceId ?? savedDeviceId;
+      final shouldConnect =
+          targetDeviceId == null || targetDeviceId == deviceId;
 
-        if (shouldConnect) {
-          appState.processBroadcast(
-            deviceId,
-            result.device.platformName,
-            result.rssi,
-            broadcastData,
-          );
+      if (shouldConnect) {
+        appState.processBroadcast(
+          deviceId,
+          result.device.platformName,
+          result.rssi,
+          broadcastData,
+        );
 
-          if (_selectedDeviceId == null) {
-            _selectedDeviceId = deviceId;
-            if (savedDeviceId != deviceId) {
-              appState.setLastConnectedDeviceId(deviceId);
-            }
+        if (_selectedDeviceId == null) {
+          _selectedDeviceId = deviceId;
+          if (savedDeviceId != deviceId) {
+            appState.setLastConnectedDeviceId(deviceId);
           }
         }
-
-        // Replace, don't just append — otherwise a device that goes silent
-        // keeps its stale RSSI and timestamp in the list forever. Consumers
-        // filter by ScanResult.timeStamp to decide which entries are still
-        // in range.
-        final existingIndex = _scanResults
-            .indexWhere((r) => r.device.remoteId == result.device.remoteId);
-        setState(() {
-          if (existingIndex >= 0) {
-            _scanResults[existingIndex] = result;
-          } else {
-            _scanResults.add(result);
-          }
-        });
       }
+
+      _upsertScanResult(result);
+    } else if (isPocketPro || isTrueBallistic) {
+      final kind = isPocketPro
+          ? ChronographDeviceType.pocketPro
+          : ChronographDeviceType.trueBallistic;
+      _gattDeviceKinds[deviceId] = kind;
+      final appState = context.read<AppState>();
+
+      // Unlike V2/D1 (passive broadcast listening), a GATT connection
+      // occupies the chronograph itself — so these devices are only
+      // listed in the pairing drawer until the user explicitly picks
+      // one there. Auto-connect fires solely for the device the user
+      // already selected, this session or persisted from a previous one.
+      final targetDeviceId =
+          _selectedDeviceId ?? appState.lastConnectedDeviceId;
+      final shouldAutoConnect =
+          targetDeviceId == deviceId && !_gattBusy;
+
+      if (shouldAutoConnect) {
+        // Reconnecting to the saved device on a fresh launch — adopt
+        // it as this session's selection so the drawer reflects it.
+        _selectedDeviceId ??= deviceId;
+        _connectGattChrono(deviceId, _gattDisplayName(kind, localName), kind);
+      }
+
+      _upsertScanResult(result);
     }
+  }
+
+  /// Display name for a GATT chronograph. The True Ballistic advertises
+  /// an obfuscated vendor string ("vXfS3c6k…") that would be noise in
+  /// the UI — substitute the product name.
+  static String _gattDisplayName(ChronographDeviceType kind, String advName) {
+    if (kind == ChronographDeviceType.trueBallistic) {
+      return 'FX True Ballistic';
+    }
+    return advName;
+  }
+
+  /// Replace, don't just append — otherwise a device that goes silent
+  /// keeps its stale RSSI and timestamp in the list forever. Consumers
+  /// filter by ScanResult.timeStamp to decide which entries are still
+  /// in range.
+  void _upsertScanResult(ScanResult result) {
+    final existingIndex = _scanResults
+        .indexWhere((r) => r.device.remoteId == result.device.remoteId);
+    setState(() {
+      if (existingIndex >= 0) {
+        _scanResults[existingIndex] = result;
+      } else {
+        _scanResults.add(result);
+      }
+    });
+  }
+
+  // ============= GATT CHRONOGRAPHS (Pocket Pro / True Ballistic) =============
+
+  /// Establish a GATT link to a connected-type chronograph, wire its
+  /// shot stream into AppState, and stop the BLE scan (concurrent scan
+  /// + GATT degrades both on Android).
+  ///
+  /// Silent by design: failures are logged and the scan restarts so
+  /// the next advertisement retries — no error UI.
+  Future<void> _connectGattChrono(
+    String deviceId,
+    String name,
+    ChronographDeviceType kind,
+  ) async {
+    if (!Platform.isAndroid && !Platform.isIOS) return;
+    final isTb = kind == ChronographDeviceType.trueBallistic;
+    final alreadyConnected = isTb
+        ? _trueBallisticClient.isConnected &&
+            _trueBallisticClient.remoteId == deviceId
+        : _pocketProClient.isConnected &&
+            _pocketProClient.remoteId == deviceId;
+    if (alreadyConnected) return;
+
+    // Claim this attempt. Any later connect or disconnect bumps the
+    // sequence, and the `stale` checks after each await below make this
+    // attempt abandon itself rather than race the newer one.
+    final attempt = ++_gattAttemptSeq;
+    bool stale() => !mounted || attempt != _gattAttemptSeq;
+
+    final appState = context.read<AppState>();
+    appState.setGattConnected(
+      true,
+      remoteId: deviceId,
+      name: name,
+      deviceType: kind,
+    );
+
+    // Stop the broadcast scan while GATT is up. Unlike _stopScan this
+    // is not a user-paused state — the watchdog stays parked because it
+    // checks the clients' connection state, and the link-drop handler
+    // below restarts the scan when the connection goes away.
+    //
+    // Awaited: stopScan can sit on the scan mutex or the platform
+    // channel, and connecting while the radio is still scanning is
+    // exactly what this is meant to prevent on Android.
+    try {
+      await FlutterBluePlus.stopScan();
+    } catch (_) {
+      // No active scan; ignore.
+    }
+    if (stale()) return;
+    await _scanSubscription?.cancel();
+    _scanSubscription = null;
+    appState.setScanning(false);
+
+    // Wire streams (cancel any previous wiring first).
+    await _gattShotSub?.cancel();
+    await _gattConnectionSub?.cancel();
+    if (stale()) return;
+
+    if (isTb) {
+      _gattShotSub = _trueBallisticClient.shotStream.listen((shot) {
+        if (stale()) return;
+        context.read<AppState>().processGattVelocity(
+              remoteId: deviceId,
+              name: name,
+              fps: shot.velocityFps.round(),
+              deviceType: kind,
+              batteryPercent: _trueBallisticClient.batteryPercent,
+              firmwareVersion: _trueBallisticClient.firmwareVersion,
+            );
+      });
+    } else {
+      _gattShotSub = _pocketProClient.velocityStream.listen((v) {
+        if (stale()) return;
+        context.read<AppState>().processGattVelocity(
+              remoteId: deviceId,
+              name: name,
+              fps: v.velocityFps.round(),
+              deviceType: kind,
+            );
+      });
+    }
+
+    // Track whether this connect attempt has ever reached `connected`.
+    // BluetoothDevice.connectionState replays its current value on
+    // subscribe, which is `disconnected` before connect() completes —
+    // we must not treat that initial emission as a dropped link, or
+    // we'd restart the scan we just stopped and re-enter the connect
+    // flow on the next advert.
+    var everConnected = false;
+    final connectionStream = isTb
+        ? _trueBallisticClient.connectionStateStream
+        : _pocketProClient.connectionStateStream;
+    _gattConnectionSub = connectionStream.listen((state) {
+      if (stale()) return;
+      final connected = state == BluetoothConnectionState.connected;
+      if (connected) everConnected = true;
+      context.read<AppState>().setGattConnected(
+            connected,
+            remoteId: connected ? deviceId : null,
+            name: connected ? name : null,
+            deviceType: kind,
+          );
+      if (!connected && everConnected) {
+        // Link dropped after we'd reached connected at least once —
+        // restart the broadcast scan so we can rediscover the device
+        // when it comes back, and let the existing reconnecting → lost
+        // timeout flow surface the recovery UI.
+        _startScan();
+      }
+    });
+
+    try {
+      final device = BluetoothDevice.fromId(deviceId);
+      if (isTb) {
+        await _trueBallisticClient.connect(device);
+        if (stale()) return;
+        // Battery and firmware were read once during discovery — push
+        // them onto the connected-device card now rather than waiting
+        // for the first shot.
+        context.read<AppState>().updateGattDeviceInfo(
+              batteryPercent: _trueBallisticClient.batteryPercent,
+              firmwareVersion: _trueBallisticClient.firmwareVersion,
+            );
+      } else {
+        await _pocketProClient.connect(device);
+      }
+    } on StateError catch (e) {
+      // Permanent validation failure — the clients throw StateError only
+      // when a connected device turns out not to expose the expected
+      // chronograph service/characteristic (e.g. a device that matched
+      // the True Ballistic name prefix by accident). Keeping it selected
+      // and persisted would silently retry it on every advertisement and
+      // every future launch, so forget it entirely.
+      debugPrint('GATT chronograph rejected: $e');
+      // A newer attempt owns the state now — it must not be clobbered
+      // by this abandoned one's error handling.
+      if (stale()) return;
+      if (_selectedDeviceId == deviceId) {
+        setState(() => _selectedDeviceId = null);
+      }
+      if (appState.lastConnectedDeviceId == deviceId) {
+        appState.setLastConnectedDeviceId(null);
+      }
+      // Clears the placeholder device and the GATT flag in one go, so
+      // the status pill doesn't sit in "reconnecting" toward a device
+      // that can never work.
+      appState.disconnectDevice();
+      _startScan();
+    } catch (e) {
+      debugPrint('GATT chronograph connect failed: $e');
+      if (stale()) return;
+      appState.setGattConnected(false);
+      // Transient failure (out of range, link flap) — resume scanning
+      // so the next advertisement retries.
+      _startScan();
+    }
+  }
+
+  /// Tear down any GATT chronograph link and clear AppState's
+  /// GATT-connected flag. Safe to call when not connected.
+  Future<void> _disconnectGattChrono() async {
+    // Invalidate any connect attempt still working through its awaits,
+    // so it can't resume and re-wire streams after this teardown.
+    _gattAttemptSeq++;
+    await _gattShotSub?.cancel();
+    _gattShotSub = null;
+    await _gattConnectionSub?.cancel();
+    _gattConnectionSub = null;
+    await _pocketProClient.disconnect();
+    await _trueBallisticClient.disconnect();
+    if (!mounted) return;
+    context.read<AppState>().setGattConnected(false);
   }
 
   void _showPermissionError() {
@@ -293,14 +583,42 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           selectedDeviceId: _selectedDeviceId,
           savedDeviceId: appState.lastConnectedDeviceId,
           connectedDevice: appState.connectedDevice,
+          isDeviceLost: appState.isDeviceLost,
           onStartScan: _startScan,
           onStopScan: _stopScan,
-          onSelectDevice: (deviceId) {
+          onSelectDevice: (deviceId) async {
+            final gattKind = _gattDeviceKinds[deviceId];
+            String? gattName;
+            if (gattKind != null) {
+              for (final r in _scanResults) {
+                if (r.device.remoteId.str == deviceId) {
+                  gattName = _gattDisplayName(
+                    gattKind,
+                    r.advertisementData.advName.isNotEmpty
+                        ? r.advertisementData.advName
+                        : r.device.platformName,
+                  );
+                  break;
+                }
+              }
+            }
             setState(() {
               _selectedDeviceId = deviceId;
             });
             appState.setLastConnectedDeviceId(deviceId);
             Navigator.pop(sheetCtx);
+            // Release any existing GATT link before switching devices.
+            await _disconnectGattChrono();
+            if (gattKind != null && mounted) {
+              await _connectGattChrono(deviceId, gattName ?? '', gattKind);
+            } else if (gattKind == null && mounted && !appState.isScanning) {
+              // Switching from a GATT chronograph (whose link had
+              // stopped the scan) to a broadcast device — restart the
+              // scan or the V2/D1 can never deliver data. Reuse the
+              // appState captured above: sheetCtx is deactivated once
+              // the pop animation finishes.
+              _startScan();
+            }
           },
           onDisconnect: () {
             _disconnectAndPauseScan(appState);
@@ -326,6 +644,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     setState(() {
       _selectedDeviceId = null;
       _scanResults.clear();
+      _gattDeviceKinds.clear();
       _userPausedScan = true;
     });
     if (Platform.isAndroid || Platform.isIOS) {
@@ -333,6 +652,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     appState.setScanning(false);
     appState.disconnectDevice();
+    // Tear down any GATT chronograph link as well — disconnectDevice
+    // only clears AppState's view of it, not the platform connection.
+    _disconnectGattChrono();
   }
 
   void _showWeightDialog() {
@@ -431,6 +753,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 children: [
                   DeviceStatusBar(
                     device: appState.connectedDevice,
+                    isConnected: appState.isConnected,
+                    isLost: appState.isDeviceLost,
                     isScanning: appState.isScanning,
                     isReconnecting:
                         appState.isDeviceLost && _selectedDeviceId != null,

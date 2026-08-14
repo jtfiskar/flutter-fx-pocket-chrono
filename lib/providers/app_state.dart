@@ -25,6 +25,13 @@ class AppState extends ChangeNotifier {
   /// Whether we're actively scanning for devices
   bool _isScanning = false;
 
+  /// Whether a GATT chronograph link (Pocket Pro / True Ballistic) is
+  /// currently up. Set by HomePage from the client's
+  /// connectionStateStream. Used by [_checkDeviceLoss] so the
+  /// broadcast-style 3 s lastSeen threshold doesn't mis-fire between
+  /// shots while the GATT link is healthy.
+  bool _isGattConnected = false;
+
   /// Timer for device loss detection (checks every second)
   Timer? _deviceLossTimer;
 
@@ -53,8 +60,18 @@ class AppState extends ChangeNotifier {
   /// Last connected device ID (for detecting device changes)
   String? _lastDeviceId;
 
-  /// Flag to prevent concurrent _recordShot calls (simple mutex)
+  /// Flag to prevent concurrent _recordShot calls (simple mutex). Used
+  /// for the broadcast V2/D1 path where the same shot is advertised
+  /// repeatedly — dropping a concurrent call is safe because the next
+  /// repeat will retry.
   bool _isRecordingShot = false;
+
+  /// Serial chain for Pocket Pro GATT shot persistence. Each NOTIFY is
+  /// a unique, non-repeated event — if we used the broadcast-style
+  /// mutex, a shot arriving while a previous save was still flushing
+  /// would be dropped permanently. Chain ordering guarantees every
+  /// notify gets persisted exactly once, in arrival order.
+  Future<void> _gattShotChain = Future.value();
 
   // ============================================================
   // User Preferences
@@ -85,8 +102,31 @@ class AppState extends ChangeNotifier {
 
   ChronographDevice? get connectedDevice => _connectedDevice;
   bool get isScanning => _isScanning;
-  bool get isConnected => _connectedDevice != null && !_connectedDevice!.isLost;
-  bool get isDeviceLost => _connectedDevice != null && _connectedDevice!.isLost;
+
+  /// Whether the connected device is reachable right now. For broadcast
+  /// devices that's a recent advert (`!isLost`); for GATT chronographs
+  /// it's the live link state, which is authoritative.
+  bool get isConnected {
+    final device = _connectedDevice;
+    if (device == null) return false;
+    if (!device.deviceType.isBroadcast) {
+      return _isGattConnected;
+    }
+    return !device.isLost;
+  }
+
+  /// Whether we're tracking a connected device that has gone silent.
+  /// For GATT chronographs this means the link is down; for V2/D1 it
+  /// means no recent advertisement.
+  bool get isDeviceLost {
+    final device = _connectedDevice;
+    if (device == null) return false;
+    if (!device.deviceType.isBroadcast) {
+      return !_isGattConnected;
+    }
+    return device.isLost;
+  }
+
   String? get lastConnectedDeviceId => _lastConnectedDeviceId;
 
   /// Whether reconnection attempt has timed out (device lost for > 30 seconds)
@@ -428,6 +468,17 @@ class AppState extends ChangeNotifier {
       return;
     }
 
+    // GATT chronographs aren't broadcast — between shots there are no
+    // packets, so the broadcast-style 3 s lastSeen threshold would
+    // constantly mis-fire. Use the platform GATT connection state as
+    // the truth instead: while the link is up, refresh lastSeen and
+    // clear any pending lost timestamp.
+    if (_isGattConnected && !device.deviceType.isBroadcast) {
+      _connectedDevice = device.update(lastSeen: DateTime.now());
+      _deviceLostAt = null;
+      return;
+    }
+
     final isLost = device.isLost;
 
     // Track when device was first lost
@@ -441,8 +492,185 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  /// Disconnect from device (stop tracking broadcasts).
+  /// Fallback display name for a GATT chronograph whose advertisement
+  /// carried no usable name.
+  static String _gattFallbackName(ChronographDeviceType type) {
+    return type == ChronographDeviceType.trueBallistic
+        ? 'FX True Ballistic'
+        : 'FX Pocket Pro';
+  }
+
+  /// Update the GATT chronograph connection state. Call from HomePage
+  /// when the client's connectionStateStream emits.
+  ///
+  /// When transitioning to [connected]=true, optional [remoteId] and
+  /// [name] populate `_connectedDevice` immediately as a placeholder
+  /// device of [deviceType], so the status bar reads "connected" before
+  /// the first shot arrives. The device is later refined in
+  /// [processGattVelocity] when shots actually fire.
+  void setGattConnected(
+    bool connected, {
+    String? remoteId,
+    String? name,
+    ChronographDeviceType deviceType = ChronographDeviceType.pocketPro,
+  }) {
+    final deviceChanged =
+        connected && remoteId != null && _connectedDevice?.remoteId != remoteId;
+    if (_isGattConnected == connected && !deviceChanged) return;
+
+    _isGattConnected = connected;
+
+    if (connected) {
+      if (remoteId != null && (deviceChanged || _connectedDevice == null)) {
+        _connectedDevice = ChronographDevice(
+          remoteId: remoteId,
+          name: (name == null || name.isEmpty)
+              ? _gattFallbackName(deviceType)
+              : name,
+          deviceType: deviceType,
+          rssi: 0,
+          batteryPercent: 0,
+          signalStrength: null,
+          lastSeen: DateTime.now(),
+        );
+        _lastDeviceId = remoteId;
+        _lastShotCounter = -1;
+      } else if (_connectedDevice != null &&
+          !_connectedDevice!.deviceType.isBroadcast) {
+        // Same device re-connected after an outage. The status bar
+        // derives loss from lastSeen, which is stale by now — refresh it
+        // so the notifyListeners below renders "connected", not "Lost".
+        _connectedDevice = _connectedDevice!.update(lastSeen: DateTime.now());
+      }
+      _ensureDeviceLossTimer();
+      _deviceLostAt = null;
+    } else {
+      // Link dropped — start the reconnect-timeout clock so the UI
+      // can transition reconnecting → lost.
+      _deviceLostAt ??= DateTime.now();
+    }
+    notifyListeners();
+  }
+
+  /// Refresh telemetry on the connected GATT chronograph once the
+  /// client has read it (True Ballistic exposes battery and firmware
+  /// as one-shot reads during connect; the Pocket Pro exposes neither).
+  void updateGattDeviceInfo({int? batteryPercent, String? firmwareVersion}) {
+    final device = _connectedDevice;
+    if (device == null || device.deviceType.isBroadcast) return;
+    if (batteryPercent == null && firmwareVersion == null) return;
+    _connectedDevice = device.update(
+      batteryPercent: batteryPercent,
+      firmwareVersion: firmwareVersion,
+    );
+    notifyListeners();
+  }
+
+  /// Process a velocity reading from a GATT chronograph NOTIFY packet
+  /// (Pocket Pro or True Ballistic).
+  ///
+  /// Each notify is exactly one shot (firmware emits per-shot), so
+  /// unlike [processBroadcast] there's no shot-counter discipline —
+  /// we just record the velocity directly.
+  void processGattVelocity({
+    required String remoteId,
+    required String name,
+    required int fps,
+    ChronographDeviceType deviceType = ChronographDeviceType.pocketPro,
+    int? batteryPercent,
+    String? firmwareVersion,
+  }) {
+    if (fps <= 0) return;
+
+    final isDeviceChange = _lastDeviceId != null && _lastDeviceId != remoteId;
+
+    _connectedDevice = ChronographDevice(
+      remoteId: remoteId,
+      name: name.isNotEmpty ? name : _gattFallbackName(deviceType),
+      deviceType: deviceType,
+      rssi: 0, // not exposed over GATT
+      // Pocket Pro exposes no battery in VRS; True Ballistic reads it
+      // once during connect.
+      batteryPercent: batteryPercent ?? 0,
+      signalStrength: null,
+      firmwareVersion: firmwareVersion,
+      lastSeen: DateTime.now(),
+    );
+
+    _ensureDeviceLossTimer();
+
+    if (isDeviceChange) {
+      _lastShotCounter = -1;
+    }
+    _lastDeviceId = remoteId;
+
+    // One notify = one shot. Persist on a serial chain instead of
+    // through _recordShot — the broadcast-style _isRecordingShot mutex
+    // would silently drop rapid-fire shots since GATT notifies don't
+    // repeat. Capture the session and the arrival time so a queued shot
+    // can't be misfiled if the user starts a new session before it
+    // persists, and so its timestamp reflects when it was fired rather
+    // than when the storage write got its turn.
+    final arrivalSession = _currentSession;
+    final arrivalTime = DateTime.now();
+    _gattShotChain = _gattShotChain
+        .then((_) => _persistGattShot(fps, arrivalSession, arrivalTime));
+
+    notifyListeners();
+  }
+
+  /// Persist one GATT chronograph shot. Called serially via
+  /// [_gattShotChain] so concurrent notifies are queued, not dropped.
+  ///
+  /// [arrivalSession] is the session that was current when the shot's
+  /// notification arrived. Normally it still is by the time this runs;
+  /// if the user switched sessions while the shot sat in the queue, the
+  /// shot is appended to the session it arrived under (already flushed
+  /// to storage by [startNewSession]) instead of the new one.
+  Future<void> _persistGattShot(
+    int velocityFps,
+    Session? arrivalSession,
+    DateTime arrivalTime,
+  ) async {
+    try {
+      if (arrivalSession != null && _currentSession?.id != arrivalSession.id) {
+        // Re-load the stored copy — an earlier queued shot may already
+        // have appended to it, and this captured snapshot predates that.
+        final stored = await SessionStorage.getSession(arrivalSession.id);
+        final target = (stored ?? arrivalSession)
+            .addShot(velocityFps, timestamp: arrivalTime);
+        if (await SessionStorage.saveSession(target)) {
+          await _loadSavedSessions();
+          notifyListeners();
+        } else {
+          debugPrint('Warning: Failed to persist queued GATT shot');
+        }
+        return;
+      }
+
+      if (_currentSession == null) {
+        await startNewSession();
+      }
+      final previousSession = _currentSession;
+      _currentSession =
+          _currentSession!.addShot(velocityFps, timestamp: arrivalTime);
+      final saved = await SessionStorage.saveSession(_currentSession!);
+      if (!saved) {
+        debugPrint('Warning: Failed to persist GATT chronograph shot');
+        _currentSession = previousSession;
+        notifyListeners();
+        return;
+      }
+      await _loadSavedSessions();
+      notifyListeners();
+    } catch (e) {
+      debugPrint('Error persisting GATT chronograph shot: $e');
+    }
+  }
+
+  /// Disconnect from device (stop tracking broadcasts / GATT link).
   void disconnectDevice() {
+    _isGattConnected = false;
     _deviceLossTimer?.cancel();
     _deviceLossTimer = null;
     _connectedDevice = null;

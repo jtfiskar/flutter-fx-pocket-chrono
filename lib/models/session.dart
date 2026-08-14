@@ -102,11 +102,15 @@ class Session {
   }
 
   /// Create a new session with an additional shot
-  Session addShot(int velocityFps) {
+  /// [timestamp] defaults to now. GATT chronographs pass the moment the
+  /// shot notification arrived: rapid fire queues behind SharedPreferences
+  /// writes, and stamping at persist time would record the storage delay
+  /// as the shot interval.
+  Session addShot(int velocityFps, {DateTime? timestamp}) {
     final newShot = Shot(
       number: shots.length + 1,
       velocityFps: velocityFps,
-      timestamp: DateTime.now(),
+      timestamp: timestamp ?? DateTime.now(),
     );
     return Session(
       id: id,

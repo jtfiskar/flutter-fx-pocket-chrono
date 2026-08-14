@@ -144,6 +144,26 @@ class BroadcastParser {
     return manufacturerData[0] == _devicePocketChrono;
   }
 
+  /// Pocket Pro VRS (Velocity Radar Service) UUID. Pocket Pro advertises
+  /// this 128-bit service UUID in its scan response (or scan record); it
+  /// does not use Nordic 0x0059 manufacturer data like V2/D1.
+  static const String pocketProServiceUuid =
+      '5445883a-3cab-42e5-b625-ca4e243f5a2c';
+
+  /// Match a Pocket Pro by either advertised service UUID or local name.
+  /// Pass the lowercase string forms of the advertised service UUIDs (as
+  /// flutter_blue_plus exposes them via `Guid.toString()`), and the
+  /// advertised local/platform name.
+  static bool isPocketProAdvertisement({
+    required Iterable<String> serviceUuids,
+    required String localName,
+  }) {
+    for (final uuid in serviceUuids) {
+      if (uuid.toLowerCase() == pocketProServiceUuid) return true;
+    }
+    return localName.startsWith('FX Pocket Pro');
+  }
+
   // Check UUID matches V2
   static bool _checkUuidV2(int u1, int u2, int u3, int u4) {
     return u1 == _uuidV2[0] &&

@@ -5,6 +5,27 @@ enum ChronographDeviceType {
 
   /// Chrono Litegraph D1 (MkIII)
   pocketD1,
+
+  /// FX Pocket Pro (GATT-connected, VRS service)
+  pocketPro,
+
+  /// FX True Ballistic Chronograph (GATT-connected, doppler radar)
+  trueBallistic,
+}
+
+/// Whether this device type publishes its data via BLE advertisements
+/// (true) or requires a GATT connection (false).
+extension ChronographDeviceTypeTransport on ChronographDeviceType {
+  bool get isBroadcast {
+    switch (this) {
+      case ChronographDeviceType.pocketV2:
+      case ChronographDeviceType.pocketD1:
+        return true;
+      case ChronographDeviceType.pocketPro:
+      case ChronographDeviceType.trueBallistic:
+        return false;
+    }
+  }
 }
 
 /// Represents a connected or detected chronograph device.
@@ -58,6 +79,10 @@ class ChronographDevice {
         return 'Pocket V2';
       case ChronographDeviceType.pocketD1:
         return 'Pocket D1';
+      case ChronographDeviceType.pocketPro:
+        return 'Pocket Pro';
+      case ChronographDeviceType.trueBallistic:
+        return 'True Ballistic';
     }
   }
 

@@ -5,6 +5,7 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import '../models/broadcast_data.dart';
 import '../models/chronograph_device.dart';
 import '../services/broadcast_parser.dart';
+import '../services/true_ballistic_client.dart';
 import '../theme/app_theme.dart';
 
 /// Drawer-style device selector, launched as a modal bottom sheet from
@@ -17,6 +18,11 @@ class PairingDrawer extends StatefulWidget {
   final String? selectedDeviceId;
   final String? savedDeviceId;
   final ChronographDevice? connectedDevice;
+
+  /// Authoritative loss state from AppState — GATT-aware, unlike
+  /// [ChronographDevice.isLost] which lags a dropped link by up to the
+  /// 3 s lastSeen window. Drives the LIVE/STALE pill.
+  final bool isDeviceLost;
   final VoidCallback onStartScan;
   final VoidCallback onStopScan;
   final ValueChanged<String> onSelectDevice;
@@ -37,6 +43,7 @@ class PairingDrawer extends StatefulWidget {
     required this.selectedDeviceId,
     required this.savedDeviceId,
     required this.connectedDevice,
+    required this.isDeviceLost,
     required this.onStartScan,
     required this.onStopScan,
     required this.onSelectDevice,
@@ -281,33 +288,41 @@ class _PairingDrawerState extends State<PairingDrawer> {
                   ],
                 ),
               ),
-              _statusPill(d.isLost),
+              _statusPill(widget.isDeviceLost),
             ],
           ),
           const SizedBox(height: 12),
           Row(
             children: [
               Expanded(
-                child: _telemetryCell(
-                  'BATTERY',
-                  '${d.batteryPercent}',
-                  '%',
-                  color: _batteryColor(d.batteryPercent),
-                ),
+                // Pocket Pro doesn't expose battery over its VRS
+                // service; True Ballistic reads it once during connect,
+                // so a GATT device with 0% simply has no reading yet.
+                child: d.deviceType.isBroadcast || d.batteryPercent > 0
+                    ? _telemetryCell(
+                        'BATTERY',
+                        '${d.batteryPercent}',
+                        '%',
+                        color: _batteryColor(d.batteryPercent),
+                      )
+                    : _telemetryCell('BATTERY', '—', ''),
               ),
               _vSep(),
               Expanded(
-                child: _telemetryCell(
-                  'SIGNAL',
-                  '${d.rssi}',
-                  'dBm',
-                ),
+                // GATT chronographs don't surface RSSI after connecting.
+                child: !d.deviceType.isBroadcast && d.rssi == 0
+                    ? _telemetryCell('SIGNAL', '—', '')
+                    : _telemetryCell(
+                        'SIGNAL',
+                        '${d.rssi}',
+                        'dBm',
+                      ),
               ),
               _vSep(),
               Expanded(
                 child: _telemetryCell(
                   'TYPE',
-                  d.typeName.replaceFirst('Pocket ', ''),
+                  _typeLabel(d.deviceType),
                   '',
                 ),
               ),
@@ -418,15 +433,45 @@ class _PairingDrawerState extends State<PairingDrawer> {
   /// 3-second window the live screen uses to decide a device is "lost".
   static const _scanResultFreshness = Duration(seconds: 5);
 
+  /// Pocket Pro advertises the VRS service UUID (or its local name)
+  /// instead of Nordic manufacturer data — recognize it directly from
+  /// the advert so the list can render it without a broadcast payload.
+  static bool _isPocketPro(ScanResult r) {
+    return BroadcastParser.isPocketProAdvertisement(
+      serviceUuids:
+          r.advertisementData.serviceUuids.map((g) => g.str.toLowerCase()),
+      localName: _advName(r),
+    );
+  }
+
+  /// True Ballistic is matched by the vendor's obfuscated name prefix
+  /// (it doesn't advertise its data service).
+  static bool _isTrueBallistic(ScanResult r) {
+    return TrueBallisticClient.matchesAd(
+      r.advertisementData.serviceUuids.map((g) => g.str.toLowerCase()),
+      _advName(r),
+    );
+  }
+
+  static String _advName(ScanResult r) =>
+      r.advertisementData.advName.isNotEmpty
+          ? r.advertisementData.advName
+          : r.device.platformName;
+
   Widget _nearbyList() {
-    // Filter to Pocket-protocol advertisements, drop the currently
-    // connected device (already shown in the card above), and drop
-    // stale entries whose last advertisement is too old to trust.
+    // Filter to Pocket-protocol advertisements (V2/D1 manufacturer data
+    // or a Pocket Pro VRS advert), drop the currently connected device
+    // (already shown in the card above), and drop stale entries whose
+    // last advertisement is too old to trust.
     final connectedId = widget.connectedDevice?.remoteId;
     final now = DateTime.now();
     final filtered = widget.scanResults.where((r) {
       final data = r.advertisementData.manufacturerData[0x0059];
-      if (data == null || !BroadcastParser.isPocketDevice(data)) return false;
+      final isBroadcastPocket =
+          data != null && BroadcastParser.isPocketDevice(data);
+      if (!isBroadcastPocket && !_isPocketPro(r) && !_isTrueBallistic(r)) {
+        return false;
+      }
       if (connectedId != null && r.device.remoteId.str == connectedId) {
         return false;
       }
@@ -504,12 +549,18 @@ class _PairingDrawerState extends State<PairingDrawer> {
     final inRange = hit.isNotEmpty;
     final isActive = widget.savedDeviceId == widget.connectedDevice?.remoteId;
     final name = inRange
-        ? (hit.first.device.platformName.isNotEmpty
-            ? hit.first.device.platformName
-            : (BroadcastParser.parse(
-                    hit.first.advertisementData.manufacturerData[0x0059] ??
+        ? (_isTrueBallistic(hit.first)
+            ? 'FX True Ballistic'
+            : hit.first.device.platformName.isNotEmpty
+                ? hit.first.device.platformName
+                : _isPocketPro(hit.first)
+                    ? 'FX Pocket Pro'
+                    : (BroadcastParser.parse(hit
+                            .first
+                            .advertisementData
+                            .manufacturerData[0x0059] ??
                         const []))
-                .deviceName)
+                        .deviceName)
         : (widget.connectedDevice?.name ?? 'Last connected device');
     final rssiText =
         inRange ? '${hit.first.rssi} dBm' : 'last seen — not advertising';
@@ -640,10 +691,21 @@ class _PairingDrawerState extends State<PairingDrawer> {
         : BroadcastData.invalid();
     final deviceId = r.device.remoteId.str;
     final isSelected = deviceId == widget.selectedDeviceId;
-    final name = r.device.platformName.isNotEmpty
-        ? r.device.platformName
-        : broadcastData.deviceName;
+    final isPro = _isPocketPro(r);
+    final isTb = !isPro && _isTrueBallistic(r);
+    // True Ballistic advertises an obfuscated vendor string — show the
+    // product name instead of the gibberish.
+    final name = isTb
+        ? 'FX True Ballistic'
+        : r.device.platformName.isNotEmpty
+            ? r.device.platformName
+            : (isPro ? 'FX Pocket Pro' : broadcastData.deviceName);
     final bars = _rssiBars(r.rssi);
+    // GATT chronographs carry no battery in their advert — showing the
+    // parsed 0% would just look like a dead cell.
+    final subtitle = isPro || isTb
+        ? '$deviceId · ${r.rssi} dBm'
+        : '$deviceId · ${broadcastData.batteryPercent}% · ${r.rssi} dBm';
 
     return InkWell(
       onTap: () => widget.onSelectDevice(deviceId),
@@ -686,7 +748,7 @@ class _PairingDrawerState extends State<PairingDrawer> {
                   ),
                   const SizedBox(height: 2),
                   Text(
-                    '$deviceId · ${broadcastData.batteryPercent}% · ${r.rssi} dBm',
+                    subtitle,
                     style: const TextStyle(
                       fontFamily: AppFonts.mono,
                       fontSize: 10,
@@ -830,6 +892,21 @@ class _PairingDrawerState extends State<PairingDrawer> {
     if (pct > 50) return AppColors.good;
     if (pct > 20) return AppColors.warn;
     return AppColors.danger;
+  }
+
+  /// Compact type label for the telemetry cell — the full "True
+  /// Ballistic" doesn't fit a third-width cell at telemetry size.
+  static String _typeLabel(ChronographDeviceType type) {
+    switch (type) {
+      case ChronographDeviceType.pocketV2:
+        return 'V2';
+      case ChronographDeviceType.pocketD1:
+        return 'D1';
+      case ChronographDeviceType.pocketPro:
+        return 'Pro';
+      case ChronographDeviceType.trueBallistic:
+        return 'True';
+    }
   }
 
   int _rssiBars(int rssi) {
