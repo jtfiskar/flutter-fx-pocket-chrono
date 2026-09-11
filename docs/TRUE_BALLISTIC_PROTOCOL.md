@@ -180,23 +180,33 @@ Send `$` + two letters. Reply is `$…!`.
 Send `#KEY=int,KEY=int,…!`. A `#` inside the line also works as a separator.
 All values are integers. One unknown key rejects the **whole** line.
 
-| Key | Setting |
-|---|---|
-| `V1`, `V2` | primary / secondary velocity unit |
-| `VR` | velocity range |
-| `BO` | velocity offset |
-| `WU`, `BW` | weight unit, bullet weight |
-| `DU`, `D0`…`D3` | distance unit, the four display distances |
-| `DM` | drag model (ids as in §3.1) |
-| `ST` | auto shutdown time |
-| `PO` | radar power output |
-| `TS` | trigger sensitivity |
-| `NI` | noise indicator |
-| `TC` | TX frequency offset |
-| `WE` | include weather in BC |
-| `TU`, `TE`, `PR`, `HU` | temperature unit, temperature, pressure, humidity |
-| `PS` | flag only; device shows "Preset loaded" |
-| `DN` | done: `1` save, `2` save and start measuring |
+| Key | Setting | Values |
+|---|---|---|
+| `V1`, `V2` | primary / secondary display unit | 0 fps, 1 m/s, 2 joules, 3 ft·lb |
+| `VR` | velocity range | 0 = 400–4000 fps (122–1219 m/s), 1 = 2000–4500 fps (610–1372 m/s) |
+| `BO` | muzzle-to-radar offset | cm, 10–40 in steps of 10 |
+| `WU` | weight unit | 0 grams, 1 grains |
+| `BW` | bullet weight | tenths of the `WU` unit, e.g. `BW=1680` with `WU=1` is 168.0 gr; max 64.8 g / 1000.0 gr |
+| `DU` | distance unit | 0 metres, 1 yards |
+| `D0`…`D3` | the four display distances | 0–300 in the `DU` unit |
+| `DM` | drag model | 0 Basic, 3 G1, 4 G7, 5 RA4, 6 GA (1 and 2 are legacy and not selectable) |
+| `ST` | auto shutdown | seconds, 60–1200 in steps of 10 |
+| `PO` | radar output power | 0 low (indoors), 1 high (outdoors) |
+| `TS` | trigger sensitivity | 0–17; even values are the "cross-verify" variants, odd values plain, from `[1] Minimal` (0, 1) to `[9] Maximum` (16, 17) |
+| `NI` | noise indicator | 0 off, 1 on |
+| `TC` | TX channel | MHz above 24 024, 56–144 in steps of 8; 152 = automatic. Leave as read unless you have a reason |
+| `WE` | weather in BC | 0 excluded, 1 included |
+| `TU` | temperature unit | 0 Celsius, 1 Fahrenheit |
+| `TE` | temperature | degrees in the `TU` unit, −50–110 |
+| `PR` | air pressure | hPa (mbar) |
+| `HU` | relative humidity | percent, 0–100 |
+| `PS` | preset marker | any value; device shows "Preset loaded" |
+| `DN` | done | 1 save, 2 save and start measuring |
+
+Out-of-range values are clamped by the device, not rejected. Read `$CF`
+first and write back only the keys you change; the reply is the ground
+truth for the current unit settings, which `BW`, `D0`…`D3` and `TE` depend
+on.
 
 Behaviour:
 
@@ -211,8 +221,8 @@ Typical exchange:
 
 ```
 → $CF
-← #V1=30,V2=60,VR=1,BO=0,WU=0,BW=168,DU=0,ST=10,DM=3,D0=100,...!
-→ #DM=4,BW=175,DN=1!
+← #V1=0,V2=1,VR=0,BO=20,WU=1,BW=1680,DU=0,ST=300,DM=3,D0=100,...!
+→ #DM=4,BW=1750,DN=1!
    (device shows "Configuration set")
 ```
 
