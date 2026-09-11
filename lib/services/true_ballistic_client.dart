@@ -5,11 +5,23 @@
 /// True Ballistic is a connected GATT device that pushes one notification per
 /// shot on [TrueBallisticUuids.notify].
 ///
-/// Chrono Lite wants **muzzle velocity only**. The device also reports a
-/// measured BC (packet 0x0B) and a polynomial drag model (0x0C); those fields
-/// are parsed past and discarded. Mirrors the reference client in
+/// Chrono Lite's shot pipeline wants **muzzle velocity only**, but the parser
+/// decodes everything the firmware puts on the wire so this file doubles as a
+/// worked example of the protocol:
+///
+///   - 0x0B "ballistic" packets carry the on-device BC fit and the drag model
+///     it was fitted against ([TrueBallisticShot.bc], [TrueBallisticShot.dragModel]).
+///   - 0x0C "polynomial" packets carry the raw velocity-decay polynomial for
+///     shots where the BC fit did not converge; those coefficients are still
+///     parsed past and discarded.
+///   - The optional "3rd party interface" characteristic
+///     ([TrueBallisticUuids.thirdParty]) pushes an ASCII string with the
+///     fitted velocity at 0 / 50 / 100 m ([TrueBallisticDownrange]).
+///
+/// Mirrors the reference client in
 /// `~/flutter/BallisticSolver/lib/services/true_ballistic_parser.dart` and
-/// `true_ballistic_ble_service.dart`.
+/// `true_ballistic_ble_service.dart`, extended with the firmware's 0x0B
+/// payload and 0x162B string (`StmRangeChrono/Src/ble.c`).
 ///
 /// Format verified against BOTH sibling implementations, which agree exactly:
 ///   - ChronoAndroid  `scanner/FirearmParser.java`
@@ -44,6 +56,48 @@ class TrueBallisticUuids {
 
   /// Battery level (read).
   static const String battery = '00001627-88ec-688c-644b-3fa706c0bb76';
+
+  /// "3rd party interface" (read + notify, added in later firmware).
+  ///
+  /// One ASCII string per shot, `"%05u-%05u-%05u"`, holding the fitted
+  /// velocity at 0 m, 50 m and 100 m in tenths of fps. The 50/100 m fields
+  /// are `00000` whenever the BC fit failed (the same shots that arrive as
+  /// 0x0C on [notify]). Initial value before the first shot is `"Boot"`.
+  /// Older firmware does not expose this characteristic at all.
+  static const String thirdParty = '0000162b-88ec-688c-644b-3fa706c0bb76';
+}
+
+/// Drag model the chronograph fitted its BC against (0x0B byte 8).
+///
+/// Ids match `DRAG_MODEL_*` in the firmware's `config.h`. Ids 1 and 2 were
+/// the first-generation G1/G7 tables and are no longer selectable in the
+/// device menu, but are kept here so an old unit still decodes.
+enum TrueBallisticDragModel {
+  /// "Basic": no drag model, the BC solver never runs. A shot taken in this
+  /// mode is always sent as 0x0C, so this value never appears in a 0x0B
+  /// packet in practice; it is here for completeness.
+  basic(0, 'Basic'),
+  g1Legacy(1, 'G1 (legacy)'),
+  g7Legacy(2, 'G7 (legacy)'),
+  g1(3, 'G1'),
+  g7(4, 'G7'),
+  ra4(5, 'RA4'),
+  ga(6, 'GA');
+
+  const TrueBallisticDragModel(this.id, this.label);
+
+  /// Wire id.
+  final int id;
+
+  /// Short human label, as shown in the device's own menu.
+  final String label;
+
+  static TrueBallisticDragModel? fromId(int id) {
+    for (final m in values) {
+      if (m.id == id) return m;
+    }
+    return null;
+  }
 }
 
 /// One shot as reported by the chronograph.
@@ -58,19 +112,73 @@ class TrueBallisticShot {
   /// Packet discriminator: 0x0A simple, 0x0B ballistic, 0x0C polynomial.
   final int packetType;
 
+  /// Ballistic coefficient fitted on the device, in the units of [dragModel]
+  /// (e.g. lb/in² for G1/G7). Only present on 0x0B packets; null otherwise,
+  /// which means the device could not fit a BC for this shot — *not* that
+  /// the drag model is "Basic".
+  final double? bc;
+
+  /// Drag model the BC was fitted against. Only present on 0x0B packets.
+  final TrueBallisticDragModel? dragModel;
+
+  /// Raw drag-model id from the wire, kept so an id this enum does not know
+  /// (newer firmware) is still visible. Only present on 0x0B packets.
+  final int? dragModelId;
+
   const TrueBallisticShot({
     required this.velocityMs,
     required this.hertz,
     required this.packetType,
+    this.bc,
+    this.dragModel,
+    this.dragModelId,
   });
 
   /// Muzzle velocity in fps — Chrono Lite's shot pipeline is fps-based.
   double get velocityFps => velocityMs / 0.3048;
 
+  /// True when the packet carried a fitted BC.
+  bool get hasBc => bc != null;
+
   @override
-  String toString() =>
-      'TrueBallisticShot(${velocityMs.toStringAsFixed(1)} m/s, '
-      '$hertz Hz, type 0x${packetType.toRadixString(16).toUpperCase()})';
+  String toString() {
+    final base = 'TrueBallisticShot(${velocityMs.toStringAsFixed(1)} m/s, '
+        '$hertz Hz, type 0x${packetType.toRadixString(16).toUpperCase()}';
+    if (bc == null) return '$base)';
+    final model = dragModel?.label ?? 'model $dragModelId';
+    return '$base, BC ${bc!.toStringAsFixed(3)} $model)';
+  }
+}
+
+/// Fitted downrange velocities from the "3rd party interface" string.
+///
+/// The firmware evaluates its fitted trajectory at three fixed ranges. Field
+/// one is the regression's 0 m velocity and can differ by a few fps from the
+/// Doppler peak carried in the shot packet for the same shot.
+class TrueBallisticDownrange {
+  /// Velocity at the muzzle (0 m), fps.
+  final double muzzleFps;
+
+  /// Velocity at 50 m, fps. Null when the device could not fit a BC.
+  final double? fps50m;
+
+  /// Velocity at 100 m, fps. Null when the device could not fit a BC.
+  final double? fps100m;
+
+  const TrueBallisticDownrange({
+    required this.muzzleFps,
+    this.fps50m,
+    this.fps100m,
+  });
+
+  /// True when both downrange values are present, i.e. the BC fit succeeded.
+  bool get hasDownrange => fps50m != null && fps100m != null;
+
+  @override
+  String toString() => 'TrueBallisticDownrange('
+      '${muzzleFps.toStringAsFixed(1)} fps @0m, '
+      '${fps50m?.toStringAsFixed(1) ?? '—'} @50m, '
+      '${fps100m?.toStringAsFixed(1) ?? '—'} @100m)';
 }
 
 class TrueBallisticParser {
@@ -78,8 +186,18 @@ class TrueBallisticParser {
   /// The reference implementations require exactly 20 bytes for this type.
   static const int typeSimple = 0x0A;
 
-  /// Ballistic: velocity + measured BC + drag model. BC/model discarded.
+  /// Ballistic: velocity + measured BC + drag model. Layout:
+  ///
+  /// | Bytes | Field       | Encoding                              |
+  /// |-------|-------------|---------------------------------------|
+  /// | 0     | type        | 0x0B                                  |
+  /// | 1-3   | muzzle Hz   | uint24 big-endian, 24.08 GHz carrier  |
+  /// | 4-7   | BC          | float32 big-endian                    |
+  /// | 8     | drag model  | [TrueBallisticDragModel] id           |
   static const int typeBallistic = 0x0B;
+
+  /// Wire length of a complete 0x0B packet.
+  static const int ballisticLength = 9;
 
   /// Polynomial: velocity + three drag coefficients. Coefficients discarded.
   static const int typePolynomial = 0x0C;
@@ -141,10 +259,63 @@ class TrueBallisticParser {
     // would poison statistics and energy readouts.
     if (velocityMs > 3048) return null;
 
+    double? bc;
+    int? dragModelId;
+    if (type == typeBallistic && bytes.length >= ballisticLength) {
+      // Firmware writes the float MSB-first (bc[3]..bc[0] of a little-endian
+      // ARM float), so this is a plain big-endian IEEE 754 read.
+      final value = ByteData.sublistView(
+        Uint8List.fromList(bytes.sublist(4, 8)),
+      ).getFloat32(0, Endian.big);
+      // A non-finite or non-positive BC is a corrupt frame, never a fit —
+      // the solver only reports after it converged on a positive value.
+      if (value.isFinite && value > 0) {
+        bc = value;
+        dragModelId = bytes[8];
+      }
+    }
+
     return TrueBallisticShot(
       velocityMs: velocityMs,
       hertz: hertz,
       packetType: type,
+      bc: bc,
+      dragModel: dragModelId == null
+          ? null
+          : TrueBallisticDragModel.fromId(dragModelId),
+      dragModelId: dragModelId,
+    );
+  }
+
+  /// Parses a "3rd party interface" notification ([TrueBallisticUuids.thirdParty]).
+  ///
+  /// The payload is ASCII `"%05u-%05u-%05u"`: velocity at 0 / 50 / 100 m in
+  /// tenths of fps, e.g. `20434-20441-20623` = 2043.4 / 2044.1 / 2062.3 fps.
+  /// Returns null for the boot placeholder, a malformed string, or a zero
+  /// muzzle field. Zero downrange fields decode as null (BC fit failed).
+  static TrueBallisticDownrange? parseThirdParty(List<int> bytes) {
+    // Any byte outside printable ASCII is not this string.
+    if (bytes.any((b) => b < 0x20 || b > 0x7E)) return null;
+    final text = String.fromCharCodes(bytes).trim();
+    final parts = text.split('-');
+    if (parts.length != 3) return null;
+
+    final values = <int>[];
+    for (final part in parts) {
+      // Exactly five digits — the format is zero-padded and a uint16 never
+      // exceeds 65535, so anything else is not a firmware frame.
+      if (part.length != 5) return null;
+      final v = int.tryParse(part);
+      if (v == null || v < 0) return null;
+      values.add(v);
+    }
+
+    final muzzleFps = values[0] / 10.0;
+    if (muzzleFps <= 0) return null;
+    return TrueBallisticDownrange(
+      muzzleFps: muzzleFps,
+      fps50m: values[1] == 0 ? null : values[1] / 10.0,
+      fps100m: values[2] == 0 ? null : values[2] / 10.0,
     );
   }
 
@@ -160,10 +331,13 @@ class TrueBallisticParser {
 class TrueBallisticClient {
   BluetoothDevice? _device;
   StreamSubscription<List<int>>? _shotSub;
+  StreamSubscription<List<int>>? _thirdPartySub;
   StreamSubscription<BluetoothConnectionState>? _connectionSub;
   bool _connecting = false;
 
   final StreamController<TrueBallisticShot> _shotController =
+      StreamController.broadcast();
+  final StreamController<TrueBallisticDownrange> _downrangeController =
       StreamController.broadcast();
   final StreamController<BluetoothConnectionState> _connectionStateController =
       StreamController.broadcast();
@@ -171,6 +345,17 @@ class TrueBallisticClient {
   /// One event per shot; idle (0 Hz) frames and unknown packet types are
   /// dropped by the parser.
   Stream<TrueBallisticShot> get shotStream => _shotController.stream;
+
+  /// Fitted 0 / 50 / 100 m velocities, one event per shot, from the
+  /// "3rd party interface" characteristic. Chrono Lite does not consume
+  /// this — it is wired up as a reference for clients that want downrange
+  /// data without re-fitting the 0x0C polynomial. Silent on firmware that
+  /// predates the characteristic (see [hasThirdPartyInterface]).
+  Stream<TrueBallisticDownrange> get downrangeStream =>
+      _downrangeController.stream;
+
+  /// True once discovery found the optional 0x162B characteristic.
+  bool get hasThirdPartyInterface => _thirdPartySub != null;
   Stream<BluetoothConnectionState> get connectionStateStream =>
       _connectionStateController.stream;
 
@@ -265,6 +450,21 @@ class TrueBallisticClient {
               await _shotSub?.cancel();
               _shotSub = c.onValueReceived.listen(_onShotBytes);
               await _setNotifyWithRetry(c);
+            } else if (uuid == TrueBallisticUuids.thirdParty) {
+              // Optional on newer firmware. Same listener-before-CCCD
+              // ordering as the shot characteristic; a failure here must
+              // not abort the connect, since the shot feed is what matters.
+              await _thirdPartySub?.cancel();
+              _thirdPartySub = c.onValueReceived.listen(_onThirdPartyBytes);
+              try {
+                await _setNotifyWithRetry(c);
+              } catch (e) {
+                debugPrint(
+                  'TrueBallisticClient: 3rd party notify failed (ignored): $e',
+                );
+                await _thirdPartySub?.cancel();
+                _thirdPartySub = null;
+              }
             } else if (uuid == TrueBallisticUuids.battery) {
               // Vendor battery characteristic: a plain uint8 percentage
               // (ChronoAndroid feeds this straight into
@@ -328,7 +528,21 @@ class TrueBallisticClient {
     final shot = TrueBallisticParser.parse(value);
     // Unknown packet types and idle (0 Hz) frames parse to null — the
     // device emits both, and neither is a shot.
-    if (shot != null) _shotController.add(shot);
+    if (shot != null) {
+      // Logged so anyone running from source can see the full decode
+      // (BC, drag model) even though the UI shows only velocity.
+      debugPrint('TrueBallisticClient: $shot');
+      _shotController.add(shot);
+    }
+  }
+
+  void _onThirdPartyBytes(List<int> value) {
+    final downrange = TrueBallisticParser.parseThirdParty(value);
+    // "Boot" and malformed strings parse to null.
+    if (downrange != null) {
+      debugPrint('TrueBallisticClient: $downrange');
+      _downrangeController.add(downrange);
+    }
   }
 
   /// Tear down the shot subscription and disconnect the GATT link.
@@ -342,6 +556,8 @@ class TrueBallisticClient {
     _connecting = false;
     await _shotSub?.cancel();
     _shotSub = null;
+    await _thirdPartySub?.cancel();
+    _thirdPartySub = null;
     await _connectionSub?.cancel();
     _connectionSub = null;
     final device = _device;
@@ -361,6 +577,7 @@ class TrueBallisticClient {
   Future<void> dispose() async {
     await disconnect();
     await _shotController.close();
+    await _downrangeController.close();
     await _connectionStateController.close();
   }
 }

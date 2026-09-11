@@ -309,6 +309,12 @@ Device is considered lost after 3 seconds without broadcasts:
 bool get isLost => DateTime.now().difference(lastSeen).inSeconds > 3;
 ```
 
+### True Ballistic Chronograph (GATT)
+
+The FX True Ballistic Chronograph is a connected device rather than a broadcaster. The app connects, subscribes to its shot characteristic, and decodes the on-device BC fit, drag model, and the optional 0 / 50 / 100 m downrange string. Only the muzzle velocity is shown; the rest is parsed and exposed for anyone who wants to build on it.
+
+Full byte layouts, the velocity formula, and the device's text-based remote configuration channel are in [docs/TRUE_BALLISTIC_PROTOCOL.md](docs/TRUE_BALLISTIC_PROTOCOL.md).
+
 ---
 
 ## State Management
