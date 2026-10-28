@@ -1,13 +1,13 @@
 # Chrono Lite
 
-A Flutter velocity-chronograph client that connects over Bluetooth Low Energy to compatible Doppler-radar chronograph devices. Reads BLE advertising packets, decodes velocity, and shows real-time shot data with session stats and history.
+A Flutter velocity-chronograph client that connects over Bluetooth Low Energy to compatible Doppler-radar chronograph devices. Reads BLE advertising packets or a GATT shot stream, decodes velocity, and shows real-time shot data with session stats and history.
 
 ![Platform](https://img.shields.io/badge/platform-Android%20%7C%20iOS-blue)
 ![Flutter](https://img.shields.io/badge/Flutter-3.0+-02569B?logo=flutter)
 ![Dart](https://img.shields.io/badge/Dart-3.0+-0175C2?logo=dart)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-Compatible hardware (tested): FX Pocket V2 and FX Pocket D1 (MkIII).
+Compatible hardware (tested): FX Pocket V2, FX Pocket D1 (MkIII), and FX Pocket Pro. The FX True Ballistic Chronograph is also supported.
 
 ---
 
@@ -65,7 +65,7 @@ This is a template — you have to add a few things before publishing your own b
 | **Energy Calculation** | Automatic ft-lbs or Joules from velocity + bullet weight |
 | **Session Statistics** | AVG, ES (extreme spread), SD (standard deviation) |
 | **Shot History** | Scrollable list with timestamps, auto-saved |
-| **Device Support** | FX Pocket V2 and D1 chronographs |
+| **Device Support** | FX Pocket V2, D1 and Pro chronographs, plus the FX True Ballistic |
 | **Battery & Signal** | Real-time device status in header |
 | **Offline Persistence** | Sessions saved locally, viewable in History |
 
@@ -264,7 +264,7 @@ Set `kDemoMode = false` before production builds.
 
 > Reverse-engineered from public BLE advertising broadcasts. Not officially documented by the device manufacturer. Reproduced here for interoperability.
 
-Compatible devices broadcast velocity data continuously via BLE advertising packets — no GATT connection required. The app scans and parses manufacturer data.
+The Pocket V2 and D1 broadcast velocity data continuously via BLE advertising packets — no GATT connection required. The app scans and parses manufacturer data. The Pocket Pro and True Ballistic Chronograph connect over GATT instead.
 
 ### Packet Structure
 

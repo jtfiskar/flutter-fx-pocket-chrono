@@ -1,5 +1,5 @@
 name: chrono_lite
-description: Chrono Lite — Flutter BLE chronograph client (compatible with FX Pocket V2 and D1)
+description: Chrono Lite — Flutter BLE chronograph client (compatible with FX Pocket V2, D1 and Pro, and the FX True Ballistic)
 publish_to: 'none'
 version: 1.0.0+4
 
